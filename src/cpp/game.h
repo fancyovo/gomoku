@@ -11,7 +11,7 @@ struct BlockResult {
 struct GamePool {
     int N;
     std::vector<GomokuBoard> boards;
-    std::vector<bool> finished;   // true if game ended this wave
+    std::vector<int> finished;   // 0=active, 1=finished (int avoids vector<bool> OpenMP race)
 
     GamePool(int pool_size);
 

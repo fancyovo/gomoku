@@ -4,14 +4,14 @@
 
 GamePool::GamePool(int pool_size) : N(pool_size) {
     boards.resize(N);
-    finished.resize(N, false);
+    finished.resize(N, 0);
 }
 
 void GamePool::reset_all() {
     #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         boards[i].reset();
-        finished[i] = false;
+        finished[i] = 0;
     }
 }
 
@@ -26,7 +26,7 @@ void GamePool::execute_block(
         int pool_idx = indices[i];
         int end_step = -1;
         int res = 0;
-        int reason = 0;  // 0=ongoing, 1=win, 2=illegal, 3=draw
+        int reason = 0;
 
         auto& board = boards[pool_idx];
         const int* acts = actions_32 + i * 32;
@@ -36,20 +36,20 @@ void GamePool::execute_block(
             if (r == -1) {
                 end_step = step;
                 res = board.result;
-                reason = 2;  // illegal
-                finished[pool_idx] = true;
+                reason = 2;
+                finished[pool_idx] = 1;
                 break;
             } else if (r == 1 || r == 2) {
                 end_step = step;
                 res = board.result;
-                reason = 1;  // win
-                finished[pool_idx] = true;
+                reason = 1;
+                finished[pool_idx] = 1;
                 break;
             } else if (r == 3) {
                 end_step = step;
                 res = board.result;
-                reason = 3;  // draw
-                finished[pool_idx] = true;
+                reason = 3;
+                finished[pool_idx] = 1;
                 break;
             }
         }
@@ -64,14 +64,14 @@ std::vector<int> GamePool::active_indices() const {
     std::vector<int> out;
     out.reserve(N);
     for (int i = 0; i < N; i++)
-        if (!finished[i]) out.push_back(i);
+        if (finished[i] == 0) out.push_back(i);
     return out;
 }
 
 int GamePool::active_count() const {
     int count = 0;
     for (int i = 0; i < N; i++)
-        if (!finished[i]) count++;
+        if (finished[i] == 0) count++;
     return count;
 }
 
