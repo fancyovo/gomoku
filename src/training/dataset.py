@@ -28,10 +28,10 @@ class GomokuDataset(Dataset):
     def __getitem__(self, idx):
         s = self.samples[idx]
         return {
-            "positions": s["positions"].clone(),
-            "players": s["players"].clone(),
-            "actions": s["actions"].clone(),
-            "rewards": s["rewards"].clone(),
+            "positions": s["positions"],
+            "players": s["players"],
+            "actions": s["actions"],
+            "rewards": s["rewards"],
             "actual_len": s["actual_len"],
             "result": s["result"],
         }
