@@ -67,6 +67,7 @@ def play_batch(model_a, model_b, b, a_black, device):
     positions = torch.zeros(b, 0, dtype=torch.long, device=device)
     players   = torch.zeros(b, 0, dtype=torch.long, device=device)
     occupied  = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)
+    stones    = torch.zeros(b, N_CELLS, dtype=torch.uint8, device=device)  # 0=empty, 1=black, 2=white
     active    = torch.ones(b, dtype=torch.bool, device=device)
     winners   = torch.zeros(b, dtype=torch.long, device=device)
 
@@ -77,7 +78,9 @@ def play_batch(model_a, model_b, b, a_black, device):
     fm = fm.masked_fill(occupied, -1e9)
     probs = torch.softmax(fm.float(), dim=-1)
     first = torch.multinomial(probs, 1).squeeze(-1)
-    occupied[torch.arange(b, device=device), first] = True
+    idx_batch = torch.arange(b, device=device)
+    occupied[idx_batch, first] = True
+    stones[idx_batch, first] = 1  # black
     positions = first.unsqueeze(1)
     players = torch.zeros(b, 1, dtype=torch.long, device=device)
 
@@ -130,7 +133,7 @@ def play_batch(model_a, model_b, b, a_black, device):
                         nr, nc = r + dr * k * sign, c + dc * k * sign
                         if not (0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE):
                             break
-                        if not occupied[i, nr * BOARD_SIZE + nc]:
+                        if stones[i, nr * BOARD_SIZE + nc].item() != (cp + 1):
                             break
                         cnt += 1
                 if cnt >= 5:
@@ -140,6 +143,9 @@ def play_batch(model_a, model_b, b, a_black, device):
         # Update
         occupied[active] = occupied[active].scatter_(
             1, actions[active].unsqueeze(1), True
+        )
+        stones[active] = stones[active].scatter_(
+            1, actions[active].unsqueeze(1), cp + 1
         )
         positions = torch.cat([positions, actions.unsqueeze(1)], dim=1)
         plr_col = torch.full((b, 1), cp, dtype=torch.long, device=device)
