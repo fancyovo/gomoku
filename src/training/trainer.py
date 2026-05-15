@@ -53,6 +53,8 @@ class Trainer:
         self.model.eval()
         trajectories = self.runner.run_one_wave()
         metrics["perf/self_play_time"] = time.perf_counter() - t0
+        torch.cuda.empty_cache()
+        gc.collect()
         metrics["perf/raw_games"] = len(trajectories)
         metrics["perf/python_infer"] = self.runner.timing["python"]
         metrics["perf/cpp_time_ms"] = self.runner.timing["cpp"] * 1000
@@ -114,16 +116,12 @@ class Trainer:
                 pred_rew    = rew[:, 1:].contiguous()          # (B, L-1)
                 pred_mask   = mask[:, 1:].contiguous()         # (B, L-1)
 
-                # Build action mask: at shift t, mask positions already in history pos[:, :t+1]
+                # Build action mask on CPU, then move: (B, L, n_pos) too large on GPU
                 n_pos = logits.size(-1)
-                # one-hot: (B, L, n_positions)
-                b_idx = torch.arange(B, device=self.device).unsqueeze(1).expand(B, L)
-                s_idx = torch.arange(L, device=self.device).unsqueeze(0).expand(B, L)
-                oh = torch.zeros(B, L, n_pos, dtype=torch.bool, device=self.device)
-                oh[b_idx, s_idx, pos] = True
-                # Cumulative OR: occupied at step t = any position in pos[:, :t+1]
-                occ_cum = torch.cumsum(oh.int(), dim=1) > 0  # (B, L, n_positions)
-                action_mask = occ_cum[:, :-1, :].contiguous()  # (B, L-1, n_positions)
+                oh = torch.zeros(B, L, n_pos, dtype=torch.bool)
+                oh[torch.arange(B).unsqueeze(1), torch.arange(L).unsqueeze(0), pos.cpu()] = True
+                occ_cum = oh.cummax(dim=1).values  # (B, L, n_positions)
+                action_mask = occ_cum[:, :-1, :].to(self.device)
             else:
                 pred_logits = logits.new_empty(B, 0, logits.size(-1))
                 pred_act    = act.new_empty(B, 0)
@@ -137,7 +135,7 @@ class Trainer:
                     if pred_logits.size(1) > 0:
                         probs = torch.softmax(pred_logits.float(), dim=-1)
                         log_probs = torch.log_softmax(pred_logits.float(), dim=-1)
-                        ent = -(probs * log_probs).sum(dim=-1)  # (B, L-1)
+                        ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)
                         valid_ent = ent[pred_mask]
                         if valid_ent.numel() > 0:
                             ppl = valid_ent.mean().exp().item()
@@ -230,7 +228,7 @@ class Trainer:
 
         probs = torch.softmax(logits, dim=-1)
         log_probs = torch.log_softmax(logits, dim=-1)
-        ent = -(probs * log_probs).sum(dim=-1)  # (B, L)
+        ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)  # (B, L)
 
         # Average entropy per sequence position.
         # logits[:, i, :] predicts action[:, i+1], so we mask on whether the

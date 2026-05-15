@@ -17,9 +17,9 @@ training:
   grad_clip: 1.0
   games_per_step: 32768
   page_size: 32
-  base_batch: 4096
+  base_batch: 2048
   base_seq_len: 128
-  train_batch_size: 2048
+  train_batch_size: 512
   augment: false
   checkpoint_interval: 10
   eval_interval: 50
@@ -29,4 +29,4 @@ training:
 wandb:
   project: "gomoku-transformer"
   entity: null
-  name: null  # run name, null = auto-generated
+  name: "000"  # run name, null = auto-generated

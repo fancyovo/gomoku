@@ -39,7 +39,7 @@ def reinforce_loss(
                torch.tensor(0.0, device=logits.device)
 
     if action_mask is not None:
-        logits = logits.masked_fill(action_mask, float('-inf'))
+        logits = logits.masked_fill(action_mask, -1e9)
 
     log_probs = F.log_softmax(logits, dim=-1)
     probs = torch.softmax(logits, dim=-1)
@@ -47,7 +47,8 @@ def reinforce_loss(
     selected_log_probs = log_probs[torch.arange(len(actions), device=actions.device), actions]
     policy_loss = -(selected_log_probs * rewards).mean()
 
-    entropy = -(probs * log_probs).sum(dim=-1).mean()
+    # 0 * (-inf) = NaN from masked positions; nan_to_num fixes this
+    entropy = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1).mean()
     entropy_loss = -entropy_coef * entropy
 
     loss = policy_loss * loss_scale + entropy_loss
