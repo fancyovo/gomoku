@@ -9,7 +9,7 @@ model:
   max_seq_len: 512
 
 training:
-  lr: 3.0e-3
+  lr: 1.0e-3
   lr_min: 1.0e-5
   weight_decay: 0.01
   entropy_coef: 0.01
@@ -20,7 +20,7 @@ training:
   base_batch: 4096
   base_seq_len: 128
   train_batch_size: 2048
-  augment: false
+  augment: true
   checkpoint_interval: 100
   eval_interval: 50
   eval_games: 400
