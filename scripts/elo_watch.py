@@ -216,7 +216,10 @@ def plot_elo(cache, ckpts):
 
     # Build match results from cache
     match_results = []
-    for key, (wa, wb, d) in cache.items():
+    for key, val in cache.items():
+        if key == "_meta":
+            continue
+        wa, wb, d = val
         s1, s2 = key.split("_")
         name_a = f"step_{int(s1):06d}.pt"
         name_b = f"step_{int(s2):06d}.pt"
