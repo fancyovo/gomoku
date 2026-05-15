@@ -13,6 +13,8 @@ build/
 *.env
 .env.*
 wandb_key
+.ssh_key
+.ssh_key.pub
 
 # Checkpoints (large files)
 checkpoints/

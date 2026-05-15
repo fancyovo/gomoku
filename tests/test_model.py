@@ -76,7 +76,7 @@ def test_param_count():
     model = GomokuTransformer(config)
     n = sum(p.numel() for p in model.parameters())
     print(f"  Model params: {n:,}")
-    assert 1_500_000 <= n <= 2_500_000, f"Expected ~2M params, got {n:,}"
+    assert 2_300_000 <= n <= 3_200_000, f"Expected ~2.8M params, got {n:,}"
     print("  [PASS] test_param_count")
 
 

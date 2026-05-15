@@ -1,9 +1,23 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 from .config import ModelConfig
 from .embeddings import ActionEmbedding
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor):
+        dtype = x.dtype
+        x = x.float()
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (x * rms).to(dtype) * self.weight
 
 
 class CausalSelfAttention(nn.Module):
@@ -13,52 +27,54 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.d_model = d_model
+        self.dropout = dropout
 
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.proj = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
+    def forward(self, x: torch.Tensor):
         b, s, d = x.shape
         qkv = self.qkv(x).reshape(b, s, 3, self.n_heads, self.d_head)
-        q, k, v = qkv.unbind(dim=2)  # each: (b, s, n_heads, d_head)
+        q, k, v = qkv.unbind(dim=2)
 
-        # (b, n_heads, s, d_head)
-        q = q.transpose(1, 2)
+        q = q.transpose(1, 2)  # (b, n_heads, s, d_head)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        scale = 1.0 / math.sqrt(self.d_head)
-        attn = (q @ k.transpose(-2, -1)) * scale  # (b, n_heads, s, s)
-
-        if mask is not None:
-            # mask: (s, s) causal → broadcast to (b, n_heads, s, s)
-            attn = attn.masked_fill(mask[:s, :s] == 0, float("-inf"))
-
-        attn = torch.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        out = attn @ v  # (b, n_heads, s, d_head)
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
         out = out.transpose(1, 2).reshape(b, s, d)
         return self.proj(out)
+
+
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, dropout: float):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor):
+        gate = F.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        return self.dropout(self.down_proj(gate * up))
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
         super().__init__()
-        self.ln1 = nn.LayerNorm(d_model)
+        self.norm1 = RMSNorm(d_model)
         self.attn = CausalSelfAttention(d_model, n_heads, dropout)
-        self.ln2 = nn.LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Linear(d_ff, d_model),
-            nn.Dropout(dropout),
-        )
+        self.norm2 = RMSNorm(d_model)
+        self.ffn = SwiGLUFFN(d_model, d_ff, dropout)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
-        x = x + self.attn(self.ln1(x), mask)
-        x = x + self.mlp(self.ln2(x))
+    def forward(self, x: torch.Tensor):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
         return x
 
 
@@ -71,15 +87,8 @@ class GomokuTransformer(nn.Module):
             TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
             for _ in range(config.n_layers)
         ])
-        self.ln_f = nn.LayerNorm(config.d_model)
+        self.norm_f = RMSNorm(config.d_model)
         self.head = nn.Linear(config.d_model, config.n_positions, bias=False)
-
-        # Causal mask buffer
-        self.register_buffer(
-            "causal_mask",
-            torch.tril(torch.ones(config.max_seq_len, config.max_seq_len))
-                     .view(1, 1, config.max_seq_len, config.max_seq_len),
-        )
 
         self._init_weights()
 
@@ -102,8 +111,8 @@ class GomokuTransformer(nn.Module):
         """
         x = self.embedding(positions, players)
         for layer in self.layers:
-            x = layer(x, self.causal_mask)
-        x = self.ln_f(x)
+            x = layer(x)
+        x = self.norm_f(x)
         return self.head(x)
 
     @torch.inference_mode()
@@ -111,7 +120,7 @@ class GomokuTransformer(nn.Module):
         """FP16 inference: return logits at the last position only."""
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             out = self.forward(positions, players)
-        return out[:, -1, :].float()  # (batch, n_positions)
+        return out[:, -1, :].float()
 
     @torch.inference_mode()
     def sample_actions(self, positions: torch.Tensor, players: torch.Tensor):

@@ -4,3 +4,4 @@ numpy
 pyyaml
 wandb
 tqdm
+flash-attn>=2.0  # optional, for faster FlashAttention on 4090
