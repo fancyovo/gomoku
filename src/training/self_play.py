@@ -21,6 +21,7 @@ class SelfPlayRunner:
         self.page_size = config["page_size"]
         self.base_batch = config["base_batch"]
         self.base_seq_len = config["base_seq_len"]
+        self.n_positions = model.config.n_positions
 
         if gomoku_cpp is None:
             raise RuntimeError("gomoku_cpp not built. Run: pip install -e .")
@@ -73,13 +74,24 @@ class SelfPlayRunner:
                     plr_t = torch.zeros(b, 1, dtype=torch.long, device=self.device)
                     logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
 
-                    # Sample second move (white) from prefill output
+                    # Build occupied mask: move 0 occupies its position
+                    occupied = torch.zeros(b, self.n_positions, dtype=torch.bool,
+                                          device=self.device)
+                    occupied[torch.arange(b, device=self.device),
+                             first_act.to(self.device)] = True
+
+                    # Sample second move (white) from prefill output, masking occupied
+                    logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
                     second_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
 
                     # all_actions[i] will grow to length `page`
                     all_actions = [[int(first_act[i]), int(second_act[i])] for i in range(b)]
                     n_decode = page - 2  # remaining after the 2 already-sampled moves
+
+                    # Update occupied with second move
+                    occupied[torch.arange(b, device=self.device),
+                             second_act.to(self.device)] = True
                 else:
                     # --- L > 0: prefill full sequence, then decode ---
                     pos_list, plr_list = [], []
@@ -91,12 +103,24 @@ class SelfPlayRunner:
                     pos_t = torch.tensor(pos_list, dtype=torch.long, device=self.device)
                     plr_t = torch.tensor(plr_list, dtype=torch.long, device=self.device)
 
+                    # Build occupied mask from full history
+                    b_cur, L_hist = pos_t.shape
+                    batch_idx = torch.arange(b_cur, device=self.device).unsqueeze(1).expand(b_cur, L_hist)
+                    occupied = torch.zeros(b_cur, self.n_positions, dtype=torch.bool,
+                                          device=self.device)
+                    occupied[batch_idx.reshape(-1), pos_t.reshape(-1)] = True
+
                     logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
+                    logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
                     first_block_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
 
                     all_actions = [[int(first_block_act[i])] for i in range(b)]
                     n_decode = page - 1
+
+                    # Update occupied with first decoded move
+                    occupied[torch.arange(b_cur, device=self.device),
+                             first_block_act.to(self.device)] = True
 
                 # --- Common decode loop ---
                 idx_tensor = torch.arange(b, device=self.device)
@@ -114,10 +138,15 @@ class SelfPlayRunner:
                     logits = self.model.decode(
                         current_pos, current_plr, kv_cache, idx_tensor
                     )
+                    logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
                     new_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
                     for i in range(b):
                         all_actions[i].append(int(new_act[i]))
+
+                    # Update occupied mask
+                    occupied[torch.arange(b, device=self.device),
+                             new_act.to(self.device)] = True
 
                 python_time += time.perf_counter() - t0
 

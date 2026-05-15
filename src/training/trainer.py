@@ -102,27 +102,70 @@ class Trainer:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = self.model(pos, plr)  # (B, L, n_positions)
 
-            # Perplexity logging
+            # --- CRITICAL FIX: shift logits and targets by 1 ---
+            # logits[:, t, :] is computed from positions[:, 0..t] (causal attention),
+            # so it should predict the *next* action positions[:, t+1].
+            # Previously we trained it to predict positions[:, t], which leaks the
+            # current token and causes the model to learn "copy the last input",
+            # leading to 100% illegal moves (copying opponent's last move).
+            if L > 1:
+                pred_logits = logits[:, :-1, :].contiguous()   # (B, L-1, n_positions)
+                pred_act    = act[:, 1:].contiguous()          # (B, L-1)
+                pred_rew    = rew[:, 1:].contiguous()          # (B, L-1)
+                pred_mask   = mask[:, 1:].contiguous()         # (B, L-1)
+
+                # Build action mask: at shift t, mask positions already in history pos[:, :t+1]
+                n_pos = logits.size(-1)
+                # one-hot: (B, L, n_positions)
+                b_idx = torch.arange(B, device=self.device).unsqueeze(1).expand(B, L)
+                s_idx = torch.arange(L, device=self.device).unsqueeze(0).expand(B, L)
+                oh = torch.zeros(B, L, n_pos, dtype=torch.bool, device=self.device)
+                oh[b_idx, s_idx, pos] = True
+                # Cumulative OR: occupied at step t = any position in pos[:, :t+1]
+                occ_cum = torch.cumsum(oh.int(), dim=1) > 0  # (B, L, n_positions)
+                action_mask = occ_cum[:, :-1, :].contiguous()  # (B, L-1, n_positions)
+            else:
+                pred_logits = logits.new_empty(B, 0, logits.size(-1))
+                pred_act    = act.new_empty(B, 0)
+                pred_rew    = rew.new_empty(B, 0)
+                pred_mask   = mask.new_empty(B, 0)
+                action_mask = None
+
+            # Perplexity logging on shifted predictions
             if n_batches % ppl_interval == 0:
                 with torch.no_grad():
-                    probs = torch.softmax(logits.float(), dim=-1)
-                    log_probs = torch.log_softmax(logits.float(), dim=-1)
-                    ent = -(probs * log_probs).sum(dim=-1)  # (B, L)
-                    # Perplexity per valid position
-                    valid_ent = ent[mask]
-                    if valid_ent.numel() > 0:
-                        ppl = valid_ent.mean().exp().item()
-                        ppl_curve.append((n_batches, ppl))
+                    if pred_logits.size(1) > 0:
+                        probs = torch.softmax(pred_logits.float(), dim=-1)
+                        log_probs = torch.log_softmax(pred_logits.float(), dim=-1)
+                        ent = -(probs * log_probs).sum(dim=-1)  # (B, L-1)
+                        valid_ent = ent[pred_mask]
+                        if valid_ent.numel() > 0:
+                            ppl = valid_ent.mean().exp().item()
+                            ppl_curve.append((n_batches, ppl))
 
-            # Flatten and compute loss
-            logits_flat = logits.reshape(B * L, -1).float()
-            act_flat = act.reshape(B * L)
-            rew_flat = rew.reshape(B * L)
-            mask_flat = mask.reshape(B * L)
+            # Flatten shifted predictions for loss computation
+            pred_logits_flat = pred_logits.reshape(-1, pred_logits.size(-1)).float()
+            pred_act_flat    = pred_act.reshape(-1)
+            pred_rew_flat    = pred_rew.reshape(-1)
+            pred_mask_flat   = pred_mask.reshape(-1)
+            action_mask_flat = action_mask.reshape(-1, action_mask.size(-1)) if action_mask is not None else None
 
             loss, policy_loss, entropy = reinforce_loss(
-                logits_flat, act_flat, rew_flat, mask_flat, ent_coef, self.loss_scale,
+                pred_logits_flat, pred_act_flat, pred_rew_flat, pred_mask_flat,
+                ent_coef, self.loss_scale, action_mask=action_mask_flat,
             )
+
+            # Also train first_move_logits (not used in forward(), sampled via
+            # multinomial during self-play, so it gets no gradient otherwise).
+            first_mask = mask[:, 0]
+            if first_mask.any():
+                fm_logits = self.model.first_move_logits.unsqueeze(0).expand(B, -1)
+                fm_loss, _, _ = reinforce_loss(
+                    fm_logits, act[:, 0], rew[:, 0], first_mask,
+                    ent_coef, self.loss_scale,
+                )
+                loss = loss + fm_loss
+
             loss.backward()
 
             total_loss += loss.item()
@@ -130,7 +173,7 @@ class Trainer:
                 loss_curve.append((n_batches, loss.item()))
             total_policy += policy_loss.item()
             total_entropy += entropy.item()
-            n_valid_moves += mask_flat.sum().item()
+            n_valid_moves += pred_mask_flat.sum().item() + first_mask.sum().item()
             n_batches += 1
 
             if max_batches and n_batches >= max_batches:
@@ -189,12 +232,14 @@ class Trainer:
         log_probs = torch.log_softmax(logits, dim=-1)
         ent = -(probs * log_probs).sum(dim=-1)  # (B, L)
 
-        # Average entropy per sequence position (over games that are that long)
+        # Average entropy per sequence position.
+        # logits[:, i, :] predicts action[:, i+1], so we mask on whether the
+        # next action exists.
         ppl_by_len = []
-        for i in range(min(L, 225)):
-            col_mask = mask[:, i]  # which games have this position
-            if col_mask.sum() > 0:
-                avg_ent = ent[col_mask, i].mean().item()
+        for i in range(min(L - 1, 225)):
+            next_mask = mask[:, i + 1]
+            if next_mask.sum() > 0:
+                avg_ent = ent[next_mask, i].mean().item()
                 ppl_by_len.append((i, math.exp(avg_ent)))
             else:
                 break
