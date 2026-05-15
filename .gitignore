@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+
+# C++ build
+build/
+*.so
+*.o
+
+# Secrets & env
+*.env
+.env.*
+wandb_key
+
+# Checkpoints (large files)
+checkpoints/
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+.DS_Store
+*.log
+wandb/

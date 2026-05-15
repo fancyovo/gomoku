@@ -1,0 +1,28 @@
+# Gomoku Transformer — Default Configuration
+
+model:
+  d_model: 128
+  n_layers: 16
+  n_heads: 4
+  d_ff: 256
+  dropout: 0.1
+  max_seq_len: 512
+
+training:
+  lr: 3.0e-4
+  lr_min: 1.0e-5
+  weight_decay: 0.01
+  entropy_coef: 0.01
+  entropy_coef_min: 0.001
+  grad_clip: 1.0
+  games_per_step: 65536
+  infer_micro_batch: 512
+  train_micro_batch: 2048
+  checkpoint_interval: 100
+  eval_interval: 50
+  eval_games: 400
+
+# wandb logging (set WANDB_API_KEY env var, not here)
+wandb:
+  project: "gomoku-transformer"
+  entity: null  # set to your wandb username

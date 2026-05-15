@@ -1,0 +1,6 @@
+torch>=2.0
+pybind11>=2.10
+numpy
+pyyaml
+wandb
+tqdm
