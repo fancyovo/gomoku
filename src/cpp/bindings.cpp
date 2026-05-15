@@ -1,47 +1,52 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/numpy.h>
 #include "board.h"
 #include "game.h"
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(gomoku_cpp, m) {
-    m.doc() = "Gomoku board engine with OpenMP acceleration";
+    m.doc() = "Gomoku board engine with OpenMP";
 
     py::class_<GomokuBoard>(m, "Board")
         .def(py::init<>())
         .def("reset", &GomokuBoard::reset)
         .def("play_move", &GomokuBoard::play_move)
         .def("is_occupied", &GomokuBoard::is_occupied)
-        .def("check_win", &GomokuBoard::check_win)
-        .def("get_state", [](const GomokuBoard& b) {
-            std::vector<int> state(BOARD_CELLS);
-            b.get_state(state.data());
-            return state;
-        })
-        .def("get_moves", [](const GomokuBoard& b) {
-            return std::vector<int>(b.move_history, b.move_history + b.num_moves);
-        })
         .def_readonly("result", &GomokuBoard::result)
         .def_readonly("num_moves", &GomokuBoard::num_moves)
-        .def_readonly("current_player", &GomokuBoard::current_player);
-
-    py::class_<GameManager>(m, "GameManager")
-        .def(py::init<int, int>(),
-             py::arg("num_games"),
-             py::arg("seed") = 42)
-        .def("replenish", &GameManager::replenish)
-        .def("active_count", &GameManager::active_count)
-        .def("get_action_sequence", &GameManager::get_action_sequence)
-        .def("step", &GameManager::step)
-        .def_property_readonly("active_indices", [](const GameManager& gm) {
-            return gm.active_indices;
-        })
-        .def_property_readonly("total_games_started", [](const GameManager& gm) {
-            return gm.total_games_started;
+        .def_readonly("current_player", &GomokuBoard::current_player)
+        .def("get_moves", [](const GomokuBoard& b) {
+            return std::vector<int>(b.move_history, b.move_history + b.num_moves);
         });
 
-    m.def("step_batch", &step_batch);
+    py::class_<GamePool>(m, "GamePool")
+        .def(py::init<int>())
+        .def("reset_all", &GamePool::reset_all)
+        .def("active_count", &GamePool::active_count)
+        .def("active_indices", &GamePool::active_indices)
+        .def("get_moves", &GamePool::get_moves)
+        .def("execute_block", [](GamePool& pool,
+                                  py::array_t<int> indices,
+                                  py::array_t<int> actions_32) {
+            auto idx_buf = indices.request();
+            auto act_buf = actions_32.request();
+            int batch = static_cast<int>(idx_buf.size);
+
+            // out: (batch, 2) — [end_step, result] per game
+            auto out = py::array_t<int>({batch, 2});
+            auto out_buf = out.request();
+
+            pool.execute_block(
+                static_cast<const int*>(idx_buf.ptr),
+                static_cast<const int*>(act_buf.ptr),
+                batch,
+                static_cast<int*>(out_buf.ptr)
+            );
+            return out;
+        });
+
     m.def("board_size", []() { return BOARD_SIZE; });
     m.def("board_cells", []() { return BOARD_CELLS; });
 }

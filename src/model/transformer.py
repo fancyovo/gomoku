@@ -259,6 +259,9 @@ class GomokuTransformer(nn.Module):
         self.norm_f = RMSNorm(config.d_model)
         self.head = nn.Linear(config.d_model, config.n_positions, bias=False)
 
+        # Learnable initial move distribution (for seq_len=0)
+        self.first_move_logits = nn.Parameter(torch.zeros(config.n_positions))
+
         self._init_weights()
 
     def _init_weights(self):
@@ -286,17 +289,26 @@ class GomokuTransformer(nn.Module):
         return out[:, -1, :].float()
 
     @torch.inference_mode()
+    def sample_first_moves(self, batch_size: int, device: torch.device):
+        """Sample first moves from the learnable first_move_logits distribution."""
+        probs = torch.softmax(self.first_move_logits, dim=-1)
+        return torch.multinomial(probs.unsqueeze(0).expand(batch_size, -1),
+                                 num_samples=1).squeeze(-1)
+
+    @torch.inference_mode()
     def sample_actions(self, positions: torch.Tensor, players: torch.Tensor):
         """Sample one action per batch element from the policy distribution."""
         logits = self.get_logits(positions, players)
         probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-    def create_cache(self, max_games: int) -> KVCacheManager:
+    def create_cache(self, max_games: int, max_cache_len: int | None = None) -> KVCacheManager:
         """Create a KV cache manager for self-play."""
+        if max_cache_len is None:
+            max_cache_len = self.config.max_seq_len
         return KVCacheManager(
             max_games=max_games,
-            max_seq_len=self.config.max_seq_len,
+            max_seq_len=max_cache_len,
             n_layers=self.config.n_layers,
             n_heads=self.config.n_heads,
             d_head=self.config.d_model // self.config.n_heads,

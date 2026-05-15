@@ -10,7 +10,7 @@ ext_modules = [
             "src/cpp/bindings.cpp",
         ],
         include_dirs=["src/cpp"],
-        extra_compile_args=["-fopenmp"],
+        extra_compile_args=["-O3", "-march=native", "-fopenmp"],
         extra_link_args=["-fopenmp"],
         cxx_std=17,
     ),

@@ -15,8 +15,11 @@ training:
   entropy_coef: 0.01
   entropy_coef_min: 0.001
   grad_clip: 1.0
-  games_per_step: 65536
-  infer_micro_batch: 512
+  games_per_step: 32768
+  page_size: 32
+  base_batch: 4096
+  base_seq_len: 128
+  infer_micro_batch: 4096
   train_micro_batch: 2048
   checkpoint_interval: 100
   eval_interval: 50
