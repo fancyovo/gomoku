@@ -147,16 +147,25 @@ class SelfPlayRunner:
                     if end_step >= 0:
                         # Game ended within this block
                         actual_len = L + end_step + 1
+
+                        # Compute reward sign from black's perspective
+                        if result == 1:    r_black = 1.0
+                        elif result == 2:  r_black = -1.0
+                        else:              r_black = 0.0
+
                         rewards = []
 
+                        # Rewards for existing history (L moves, all valid)
+                        for _, pl in (sequences[idx] if L > 0 else []):
+                            rewards.append(r_black if pl == 0 else -r_black)
+
+                        # Rewards for this block's page actions
                         for k in range(page):
                             action = int(actions_block[j, k])
                             player = (L + k) % 2
                             pos_seq.append(action)
                             plr_seq.append(player)
-
                             if k <= end_step:
-                                r_black = 1.0 if result == 1 else (-1.0 if result == 2 else 0.0)
                                 reward = r_black if player == 0 else -r_black
                             else:
                                 reward = 0.0
