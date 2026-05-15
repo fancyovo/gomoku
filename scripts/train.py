@@ -113,6 +113,11 @@ def main():
 
         logger.log_step_end(step, wandb_metrics)
 
+        # Free per-step memory
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # --- Console ---
         ppl_pos0 = ppl_by_len[0][1] if ppl_by_len else float("nan")
         ppl_last = ppl_by_len[-1][1] if ppl_by_len else float("nan")

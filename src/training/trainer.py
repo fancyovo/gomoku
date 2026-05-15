@@ -1,3 +1,4 @@
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -156,6 +157,11 @@ class Trainer:
         # Phase 3: Perplexity by sequence position (on one batch, no grad)
         ppl_by_len = self._eval_ppl_by_len(trajectories[:1024])
         metrics["ppl_by_len"] = ppl_by_len
+
+        # Free memory: drop trajectory references and clear CUDA cache
+        del trajectories
+        torch.cuda.empty_cache()
+        gc.collect()
 
         return metrics
 
