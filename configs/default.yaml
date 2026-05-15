@@ -21,7 +21,7 @@ training:
   base_seq_len: 128
   train_batch_size: 2048
   augment: false
-  checkpoint_interval: 100
+  checkpoint_interval: 10
   eval_interval: 50
   eval_games: 400
 

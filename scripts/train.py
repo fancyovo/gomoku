@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-"""Training entry point."""
+"""Training script for Gomoku Transformer."""
 
 import argparse
 import os
 import sys
+import time
 import yaml
 import torch
-import time
+import math
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from model import ModelConfig, GomokuTransformer
 from training import Trainer
+from monitoring.logger import WandbLogger
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--max_batches", type=int, default=None,
-                        help="Limit training batches per step (for testing)")
-    parser.add_argument("--total_steps", type=int, default=10000)
+    parser.add_argument("--total_steps", type=int, default=1000)
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--no_wandb", action="store_true")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -35,9 +36,29 @@ def main():
     model = GomokuTransformer(model_cfg)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {n_params:,} params")
-    print(f"Training config: {config['training']}")
+    print(f"Config: games={config['training']['games_per_step']}, "
+          f"batch={config['training']['train_batch_size']}, "
+          f"lr={config['training']['lr']}, "
+          f"augment={config['training']['augment']}")
+    print(f"Total steps: {args.total_steps}, "
+          f"checkpoint every: {config['training']['checkpoint_interval']}")
     print()
 
+    # Wandb
+    use_wandb = not args.no_wandb
+    logger = WandbLogger(
+        project=config.get("wandb", {}).get("project", "gomoku-transformer"),
+        entity=config.get("wandb", {}).get("entity"),
+        config=config,
+        enabled=use_wandb,
+    )
+    if use_wandb:
+        print("wandb: enabled")
+    else:
+        print("wandb: disabled")
+    print()
+
+    # Trainer
     trainer = Trainer(model, config["training"], device)
 
     start_step = 0
@@ -47,32 +68,70 @@ def main():
         start_step = trainer.load_checkpoint(args.resume) + 1
         print(f"Resumed from step {start_step}")
 
+    print(f"Training from step {start_step} to {args.total_steps}")
+    print("=" * 60)
+
     for step in range(start_step, args.total_steps):
+        logger.log_step_start(step)
+
         t0 = time.perf_counter()
-        metrics = trainer.train_step(step, args.total_steps,
-                                      max_batches=args.max_batches)
+        metrics = trainer.train_step(step, args.total_steps)
         step_time = time.perf_counter() - t0
 
-        print(f"Step {step:4d} | "
-              f"loss: {metrics['loss/total']:.4f} | "
-              f"policy: {metrics['loss/policy']:.4f} | "
-              f"entropy: {metrics['loss/entropy']:.4f} | "
-              f"ppl: {metrics['policy/perplexity']:.1f} | "
-              f"games: {metrics['perf/raw_games']} | "
-              f"batches: {metrics['train/batches']} | "
-              f"moves: {metrics['train/n_valid_moves']:,} | "
-              f"sp: {metrics['perf/self_play_time']:.1f}s | "
-              f"tr: {metrics['train/time']:.1f}s | "
-              f"total: {step_time:.1f}s")
+        # --- Log to wandb ---
+        wandb_metrics = {
+            "loss/total": metrics["loss/total"],
+            "loss/policy": metrics["loss/policy"],
+            "loss/entropy": metrics["loss/entropy"],
+            "game/avg_len": metrics["game/avg_len"],
+            "game/max_len": metrics["game/max_len"],
+            "game/black_winrate": metrics["game/black_winrate"],
+            "game/white_winrate": metrics["game/white_winrate"],
+            "game/total_moves": metrics["game/total_moves"],
+            "perf/self_play_time": metrics["perf/self_play_time"],
+            "perf/train_time": metrics["train/time"],
+            "perf/step_time": step_time,
+            "perf/raw_games": metrics["perf/raw_games"],
+            "perf/n_batches": metrics["train/batches"],
+            "perf/n_valid_moves": metrics["train/n_valid_moves"],
+            "train/lr": metrics["train/lr"],
+            "train/entropy_coef": metrics["train/entropy_coef"],
+        }
 
-        if args.max_batches:
-            print(f"\nStopping after {args.max_batches} batches (test mode).")
-            break
+        # PPL by sequence position (first and last few)
+        ppl_by_len = metrics.get("ppl_by_len", [])
+        if ppl_by_len:
+            wandb_metrics["ppl/by_pos_0"] = ppl_by_len[0][1]
+            wandb_metrics["ppl/by_pos_mid"] = ppl_by_len[len(ppl_by_len)//2][1]
+            wandb_metrics["ppl/by_pos_last"] = ppl_by_len[-1][1]
 
-        if (step + 1) % config["training"]["checkpoint_interval"] == 0:
+        logger.log_step_end(step, wandb_metrics)
+
+        # --- Console ---
+        ppl_pos0 = ppl_by_len[0][1] if ppl_by_len else float("nan")
+        ppl_last = ppl_by_len[-1][1] if ppl_by_len else float("nan")
+        print(
+            f"[{step:4d}/{args.total_steps}] "
+            f"loss={metrics['loss/total']:+.4f} | "
+            f"ent={metrics['loss/entropy']:.3f} | "
+            f"ppl(0)={ppl_pos0:.0f} ppl(-1)={ppl_last:.0f} | "
+            f"len={metrics['game/avg_len']:.1f} | "
+            f"win_b={metrics['game/black_winrate']:.2%} | "
+            f"games={metrics['perf/raw_games']} | "
+            f"sp={metrics['perf/self_play_time']:.0f}s "
+            f"tr={metrics['train/time']:.0f}s "
+            f"tot={step_time:.0f}s"
+        )
+
+        # --- Checkpoint ---
+        ckpt_interval = config["training"]["checkpoint_interval"]
+        if (step + 1) % ckpt_interval == 0 or step == args.total_steps - 1:
             path = os.path.join(args.checkpoint_dir, f"step_{step:06d}.pt")
             trainer.save_checkpoint(path, step)
-            print(f"  -> checkpoint: {path}")
+            print(f"  ==> checkpoint: {path}")
+
+    logger.finish()
+    print("\nTraining complete.")
 
 
 if __name__ == "__main__":
