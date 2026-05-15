@@ -34,8 +34,8 @@ PYBIND11_MODULE(gomoku_cpp, m) {
             auto act_buf = actions_32.request();
             int batch = static_cast<int>(idx_buf.size);
 
-            // out: (batch, 2) — [end_step, result] per game
-            auto out = py::array_t<int>({batch, 2});
+            // out: (batch, 3) — [end_step, result, end_reason] per game
+            auto out = py::array_t<int>({batch, 3});
             auto out_buf = out.request();
 
             pool.execute_block(

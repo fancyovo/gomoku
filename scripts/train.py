@@ -91,6 +91,8 @@ def main():
             "game/max_len": metrics["game/max_len"],
             "game/black_winrate": metrics["game/black_winrate"],
             "game/white_winrate": metrics["game/white_winrate"],
+            "game/illegal_rate": metrics["game/illegal_rate"],
+            "game/win_rate_5": metrics["game/win_rate_5"],
             "game/total_moves": metrics["game/total_moves"],
             "perf/self_play_time": metrics["perf/self_play_time"],
             "perf/train_time": metrics["train/time"],

@@ -20,8 +20,9 @@ struct GamePool {
 
     // Execute 32 actions per game. Parallel via OpenMP.
     // indices:     (batch,)    — which pool slots to process
-    // actions_32:  (batch*32)  — flat array, row-major: game0_step0..step31, game1_step0..
-    // out_results: (batch*2)   — interleaved: [end_step0, result0, end_step1, result1, ...]
+    // actions_32:  (batch*32)  — flat array, row-major
+    // out_results: (batch*3)   — interleaved: [end_step, result, end_reason, ...]
+    //   end_reason: 0=ongoing, 1=win(5-in-a-row), 2=illegal, 3=draw
     void execute_block(
         const int* indices,
         const int* actions_32,

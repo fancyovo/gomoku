@@ -26,22 +26,37 @@ void GamePool::execute_block(
         int pool_idx = indices[i];
         int end_step = -1;
         int res = 0;
+        int reason = 0;  // 0=ongoing, 1=win, 2=illegal, 3=draw
 
         auto& board = boards[pool_idx];
         const int* acts = actions_32 + i * 32;
 
         for (int step = 0; step < 32; step++) {
             int r = board.play_move(acts[step]);
-            if (r != 0) {  // illegal (-1) or win (1/2) or draw (3)
+            if (r == -1) {
                 end_step = step;
                 res = board.result;
+                reason = 2;  // illegal
+                finished[pool_idx] = true;
+                break;
+            } else if (r == 1 || r == 2) {
+                end_step = step;
+                res = board.result;
+                reason = 1;  // win
+                finished[pool_idx] = true;
+                break;
+            } else if (r == 3) {
+                end_step = step;
+                res = board.result;
+                reason = 3;  // draw
                 finished[pool_idx] = true;
                 break;
             }
         }
 
-        out_results[i * 2]     = end_step;
-        out_results[i * 2 + 1] = res;
+        out_results[i * 3]     = end_step;
+        out_results[i * 3 + 1] = res;
+        out_results[i * 3 + 2] = reason;
     }
 }
 

@@ -135,6 +135,7 @@ class SelfPlayRunner:
                 for j, idx in enumerate(micro_indices):
                     end_step = int(results[j, 0])
                     result = int(results[j, 1])
+                    end_reason = int(results[j, 2])  # 1=win, 2=illegal, 3=draw
 
                     # Build full timeline: L existing steps + this block's actions
                     pos_seq = []
@@ -178,6 +179,7 @@ class SelfPlayRunner:
                             "rewards": torch.tensor(rewards, dtype=torch.float32),
                             "actual_len": actual_len,
                             "result": result,
+                            "end_reason": end_reason,
                         })
 
                         sequences.pop(idx, None)

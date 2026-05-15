@@ -62,8 +62,12 @@ class Trainer:
         metrics["game/total_moves"] = sum(lens)
         n_black_wins = sum(1 for t in trajectories if t["result"] == 1)
         n_white_wins = sum(1 for t in trajectories if t["result"] == 2)
+        n_illegal = sum(1 for t in trajectories if t.get("end_reason") == 2)
+        n_win = sum(1 for t in trajectories if t.get("end_reason") == 1)
         metrics["game/black_winrate"] = n_black_wins / len(trajectories)
         metrics["game/white_winrate"] = n_white_wins / len(trajectories)
+        metrics["game/illegal_rate"] = n_illegal / len(trajectories)
+        metrics["game/win_rate_5"] = n_win / len(trajectories)
 
         # Phase 2: Training
         t0 = time.perf_counter()
