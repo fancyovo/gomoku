@@ -187,11 +187,16 @@ def cache_key(a, b):
     return f"{min(sa,sb)}_{max(sa,sb)}"
 
 
-def load_cache():
+def load_cache(games_per_pair):
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE) as f:
-            return json.load(f)
-    return {}
+            data = json.load(f)
+        meta = data.get("_meta", {})
+        if meta.get("games_per_pair") == games_per_pair:
+            return data
+        else:
+            print(f"  Cache games_per_pair mismatch ({meta.get('games_per_pair')} != {games_per_pair}), discarding")
+    return {"_meta": {"games_per_pair": games_per_pair}}
 
 
 def save_cache(cache):
@@ -267,7 +272,7 @@ def main():
     model_cfg = ModelConfig.from_dict(cfg["model"])
     device = torch.device(args.device)
 
-    cache = load_cache()
+    cache = load_cache(args.games_per_pair)
     print(f"Loaded cache: {len(cache)} pairwise results")
     print(f"Watching {args.checkpoint_dir}/ for new checkpoints...")
     print(f"Games per pair: {args.games_per_pair}, batch: {args.batch}")
