@@ -84,12 +84,12 @@ def main():
     # Load models
     model_a = GomokuTransformer(model_cfg).to(device)
     ckpt_a = torch.load(args.model_a, map_location=device)
-    model_a.load_state_dict(ckpt_a["model_state_dict"])
+    model_a.load_state_dict(ckpt_a)
     model_a.eval()
 
     model_b = GomokuTransformer(model_cfg).to(device)
     ckpt_b = torch.load(args.model_b, map_location=device)
-    model_b.load_state_dict(ckpt_b["model_state_dict"])
+    model_b.load_state_dict(ckpt_b)
     model_b.eval()
 
     # Play

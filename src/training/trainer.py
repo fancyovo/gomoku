@@ -192,15 +192,9 @@ class Trainer:
         self.model.train()
         return ppl_by_len
 
-    def save_checkpoint(self, path: str, step: int):
-        torch.save({
-            "step": step,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }, path)
+    def save_checkpoint(self, path: str):
+        torch.save(self.model.state_dict(), path)
 
     def load_checkpoint(self, path: str):
-        ckpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        return ckpt["step"]
+        state = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(state)

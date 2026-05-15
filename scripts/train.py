@@ -65,7 +65,11 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     if args.resume:
-        start_step = trainer.load_checkpoint(args.resume) + 1
+        trainer.load_checkpoint(args.resume)
+        # Parse step from filename: step_XXXXXX.pt
+        import re
+        m = re.search(r"step_(\d+)", args.resume)
+        start_step = int(m.group(1)) + 1 if m else 0
         print(f"Resumed from step {start_step}")
 
     print(f"Training from step {start_step} to {args.total_steps}")
@@ -127,7 +131,7 @@ def main():
         ckpt_interval = config["training"]["checkpoint_interval"]
         if (step + 1) % ckpt_interval == 0 or step == args.total_steps - 1:
             path = os.path.join(args.checkpoint_dir, f"step_{step:06d}.pt")
-            trainer.save_checkpoint(path, step)
+            trainer.save_checkpoint(path)
             print(f"  ==> checkpoint: {path}")
 
     logger.finish()
