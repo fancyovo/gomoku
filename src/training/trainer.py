@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 import math
 import time
@@ -34,8 +35,15 @@ class Trainer:
             1.0 + math.cos(math.pi * progress)
         )
 
-    def train_step(self, step: int, total_steps: int, max_batches: int | None = None):
-        """One training step: self-play → data pipeline → gradient updates."""
+    def train_step(self, step: int, total_steps: int, max_batches: int | None = None,
+                   ppl_interval: int = 10):
+        """One training step.
+
+        Args:
+            ppl_interval: log perplexity every N batches.
+        Returns:
+            metrics dict with extra 'ppl_curve' and 'ppl_by_len'.
+        """
         metrics = {}
 
         # Phase 1: Self-play
@@ -47,12 +55,10 @@ class Trainer:
         metrics["perf/python_infer"] = self.runner.timing["python"]
         metrics["perf/cpp_time_ms"] = self.runner.timing["cpp"] * 1000
 
-        # Game stats
         lens = [t["actual_len"] for t in trajectories]
         metrics["game/avg_len"] = sum(lens) / len(lens)
         metrics["game/max_len"] = max(lens)
         metrics["game/total_moves"] = sum(lens)
-
         n_black_wins = sum(1 for t in trajectories if t["result"] == 1)
         n_white_wins = sum(1 for t in trajectories if t["result"] == 2)
         metrics["game/black_winrate"] = n_black_wins / len(trajectories)
@@ -63,10 +69,8 @@ class Trainer:
         self.model.train()
 
         dataloader = create_dataloader(
-            trajectories,
-            batch_size=self.cfg["train_batch_size"],
-            augment=self.augment,
-            shuffle=True,
+            trajectories, batch_size=self.cfg["train_batch_size"],
+            augment=self.augment, shuffle=True,
         )
 
         total_loss = 0.0
@@ -74,6 +78,9 @@ class Trainer:
         total_entropy = 0.0
         n_batches = 0
         n_valid_moves = 0
+        ppl_curve = []  # (batch_idx, perplexity)
+        entropy_by_position = None  # will accumulate per-position entropy
+        count_by_position = None
 
         ent_coef = self._entropy_coef(step, total_steps)
         self.optimizer.zero_grad()
@@ -87,12 +94,23 @@ class Trainer:
 
             B, L = pos.shape
 
-            # Forward pass (FP16)
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = self.model(pos, plr)  # (B, L, n_positions)
 
-            # Flatten
-            logits_flat = logits.reshape(B * L, -1)
+            # Perplexity logging
+            if n_batches % ppl_interval == 0:
+                with torch.no_grad():
+                    probs = torch.softmax(logits.float(), dim=-1)
+                    log_probs = torch.log_softmax(logits.float(), dim=-1)
+                    ent = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                    # Perplexity per valid position
+                    valid_ent = ent[mask]
+                    if valid_ent.numel() > 0:
+                        ppl = valid_ent.mean().exp().item()
+                        ppl_curve.append((n_batches, ppl))
+
+            # Flatten and compute loss
+            logits_flat = logits.reshape(B * L, -1).float()
             act_flat = act.reshape(B * L)
             rew_flat = rew.reshape(B * L)
             mask_flat = mask.reshape(B * L)
@@ -111,7 +129,6 @@ class Trainer:
             if max_batches and n_batches >= max_batches:
                 break
 
-        # Gradient clipping
         if self.grad_clip > 0:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
@@ -119,18 +136,58 @@ class Trainer:
 
         metrics["train/time"] = time.perf_counter() - t0
         metrics["train/batches"] = n_batches
-        metrics["train/n_valid_moves"] = n_valid_moves
+        metrics["train/n_valid_moves"] = int(n_valid_moves)
         metrics["loss/total"] = total_loss / max(n_batches, 1)
         metrics["loss/policy"] = total_policy / max(n_batches, 1)
         metrics["loss/entropy"] = total_entropy / max(n_batches, 1)
         metrics["train/entropy_coef"] = ent_coef
         metrics["train/lr"] = self.optimizer.param_groups[0]["lr"]
-
-        # Perplexity-like: e^(policy_loss)
         avg_policy = total_policy / max(n_batches, 1)
         metrics["policy/perplexity"] = math.exp(max(avg_policy, -10))
+        metrics["ppl_curve"] = ppl_curve
+
+        # Phase 3: Perplexity by sequence position (on one batch, no grad)
+        ppl_by_len = self._eval_ppl_by_len(trajectories[:1024])
+        metrics["ppl_by_len"] = ppl_by_len
 
         return metrics
+
+    @torch.no_grad()
+    def _eval_ppl_by_len(self, trajectories: list[dict]):
+        """Compute mean perplexity at each sequence position."""
+        self.model.eval()
+
+        # Build a batch from trajectories (use raw, no augment)
+        dataloader = create_dataloader(
+            trajectories, batch_size=512, augment=False, shuffle=False,
+        )
+        batch = next(iter(dataloader))
+
+        pos = batch["positions"].to(self.device)
+        plr = batch["players"].to(self.device)
+        mask = batch["mask"].to(self.device)
+
+        B, L = pos.shape
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            logits = self.model(pos, plr).float()
+
+        probs = torch.softmax(logits, dim=-1)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        ent = -(probs * log_probs).sum(dim=-1)  # (B, L)
+
+        # Average entropy per sequence position (over games that are that long)
+        ppl_by_len = []
+        for i in range(min(L, 225)):
+            col_mask = mask[:, i]  # which games have this position
+            if col_mask.sum() > 0:
+                avg_ent = ent[col_mask, i].mean().item()
+                ppl_by_len.append((i, math.exp(avg_ent)))
+            else:
+                break
+
+        self.model.train()
+        return ppl_by_len
 
     def save_checkpoint(self, path: str, step: int):
         torch.save({

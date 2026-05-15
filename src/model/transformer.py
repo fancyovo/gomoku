@@ -39,12 +39,12 @@ class KVCacheManager:
         # (max_games, n_heads, max_seq_len, d_head) per layer, FP16
         self.k = [
             torch.zeros(max_games, n_heads, max_seq_len, d_head,
-                        dtype=torch.float16, device=device)
+                        dtype=torch.bfloat16, device=device)
             for _ in range(n_layers)
         ]
         self.v = [
             torch.zeros(max_games, n_heads, max_seq_len, d_head,
-                        dtype=torch.float16, device=device)
+                        dtype=torch.bfloat16, device=device)
             for _ in range(n_layers)
         ]
         self.seq_lens = torch.zeros(max_games, dtype=torch.long, device=device)
@@ -284,7 +284,7 @@ class GomokuTransformer(nn.Module):
     @torch.inference_mode()
     def get_logits(self, positions: torch.Tensor, players: torch.Tensor):
         """FP16 inference: return logits at the last position only."""
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             out = self.forward(positions, players)
         return out[:, -1, :].float()
 
@@ -328,7 +328,7 @@ class GomokuTransformer(nn.Module):
         Returns:
             logits: (b, n_positions) — logits at the last position
         """
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             x = self.embedding(positions, players)
             for i, layer in enumerate(self.layers):
                 x = layer.prefill_store(x, cache, i, indices)
@@ -349,7 +349,7 @@ class GomokuTransformer(nn.Module):
         Returns:
             logits: (b, n_positions) — next-move logits
         """
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             pos_t = positions.unsqueeze(1)  # (b, 1)
             plr_t = players.unsqueeze(1)
             offset = cache.seq_lens[indices]  # (b,) — current position in game
