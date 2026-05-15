@@ -29,11 +29,18 @@ class SelfPlayRunner:
         self.pool = gomoku_cpp.GamePool(self.games_per_step)
         self.timing = {"python": 0.0, "cpp": 0.0}
 
+        # Pre-allocated index tensor (max batch size)
+        self._idx_cache = {}
+
     def _batch_size(self, seq_len: int) -> int:
-        # KV cache grows to seq_len + page_size during decode
         effective = max(seq_len + self.page_size, 1)
         raw = self.base_batch * self.base_seq_len / effective
         return min(max(1, _floor_pow2(int(raw))), 16384)
+
+    def _get_idx(self, b: int) -> torch.Tensor:
+        if b not in self._idx_cache:
+            self._idx_cache[b] = torch.arange(b, device=self.device)
+        return self._idx_cache[b]
 
     def run_one_wave(self):
         self.pool.reset_all()
@@ -44,13 +51,11 @@ class SelfPlayRunner:
         python_time = 0.0
         cpp_time = 0.0
 
-        # Round counter for the "all games at same length" invariant
         while True:
             active_list = self.pool.active_indices()
             if not active_list:
                 break
 
-            # All active games have the same current length
             L = len(sequences[active_list[0]])
             batch_size = self._batch_size(L)
 
@@ -59,41 +64,33 @@ class SelfPlayRunner:
                 b = len(micro_indices)
 
                 kv_cache = self.model.create_cache(max_games=b,
-                                                      max_cache_len=L + page)
+                                                    max_cache_len=L + page)
                 local_idx = list(range(b))
-
+                idx_t = self._get_idx(b)
                 t0 = time.perf_counter()
 
                 if L == 0:
-                    # --- First round: L=0, empty boards ---
-                    # Step 1: sample first move from learnable distribution (black)
-                    first_act = self.model.sample_first_moves(b, self.device).cpu()
-
-                    # Prefill this 1 token
-                    pos_t = first_act.unsqueeze(1).to(self.device)
+                    first_act = self.model.sample_first_moves(b, self.device)
+                    pos_t = first_act.unsqueeze(1)
                     plr_t = torch.zeros(b, 1, dtype=torch.long, device=self.device)
                     logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
 
-                    # Build occupied mask: move 0 occupies its position
                     occupied = torch.zeros(b, self.n_positions, dtype=torch.bool,
                                           device=self.device)
-                    occupied[torch.arange(b, device=self.device),
-                             first_act.to(self.device)] = True
+                    occupied[idx_t, first_act] = True
 
-                    # Sample second move (white) from prefill output, masking occupied
                     logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
-                    second_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
+                    second_act = torch.multinomial(probs, 1).squeeze(-1)
+                    occupied[idx_t, second_act] = True
 
-                    # all_actions[i] will grow to length `page`
-                    all_actions = [[int(first_act[i]), int(second_act[i])] for i in range(b)]
-                    n_decode = page - 2  # remaining after the 2 already-sampled moves
-
-                    # Update occupied with second move
-                    occupied[torch.arange(b, device=self.device),
-                             second_act.to(self.device)] = True
+                    # Store actions on GPU: (b, page)
+                    actions_gpu = torch.zeros(b, page, dtype=torch.long, device=self.device)
+                    actions_gpu[:, 0] = first_act
+                    actions_gpu[:, 1] = second_act
+                    cur_col = 2
+                    n_decode = page - 2
                 else:
-                    # --- L > 0: prefill full sequence, then decode ---
                     pos_list, plr_list = [], []
                     for idx in micro_indices:
                         seq = sequences[idx]
@@ -103,70 +100,58 @@ class SelfPlayRunner:
                     pos_t = torch.tensor(pos_list, dtype=torch.long, device=self.device)
                     plr_t = torch.tensor(plr_list, dtype=torch.long, device=self.device)
 
-                    # Build occupied mask from full history
-                    b_cur, L_hist = pos_t.shape
-                    batch_idx = torch.arange(b_cur, device=self.device).unsqueeze(1).expand(b_cur, L_hist)
-                    occupied = torch.zeros(b_cur, self.n_positions, dtype=torch.bool,
+                    occupied = torch.zeros(b, self.n_positions, dtype=torch.bool,
                                           device=self.device)
-                    occupied[batch_idx.reshape(-1), pos_t.reshape(-1)] = True
+                    occupied[idx_t.unsqueeze(1).expand(b, L).reshape(-1),
+                             pos_t.reshape(-1)] = True
 
                     logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
                     logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
-                    first_block_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
+                    first_block_act = torch.multinomial(probs, 1).squeeze(-1)
+                    occupied[idx_t, first_block_act] = True
 
-                    all_actions = [[int(first_block_act[i])] for i in range(b)]
+                    actions_gpu = torch.zeros(b, page, dtype=torch.long, device=self.device)
+                    actions_gpu[:, 0] = first_block_act
+                    cur_col = 1
                     n_decode = page - 1
 
-                    # Update occupied with first decoded move
-                    occupied[torch.arange(b_cur, device=self.device),
-                             first_block_act.to(self.device)] = True
-
-                # --- Common decode loop ---
-                idx_tensor = torch.arange(b, device=self.device)
-                for _ in range(n_decode):
-                    # The token just sampled (input to decode) is the last in each list
-                    current_pos = torch.tensor(
-                        [all_actions[i][-1] for i in range(b)],
-                        dtype=torch.long, device=self.device
-                    )
-                    # Actual global step of this token = L + len(all_actions[i]) - 1
-                    current_step = L + len(all_actions[0]) - 1
+                # Decode loop — everything stays on GPU
+                for step in range(n_decode):
+                    current_pos = actions_gpu[:, cur_col - 1]
+                    current_step = L + cur_col - 1
                     current_plr = torch.full((b,), current_step % 2,
                                              dtype=torch.long, device=self.device)
 
                     logits = self.model.decode(
-                        current_pos, current_plr, kv_cache, idx_tensor
+                        current_pos, current_plr, kv_cache, idx_t
                     )
                     logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
-                    new_act = torch.multinomial(probs, 1).squeeze(-1).cpu()
-                    for i in range(b):
-                        all_actions[i].append(int(new_act[i]))
+                    new_act = torch.multinomial(probs, 1).squeeze(-1)
+                    occupied[idx_t, new_act] = True
+                    actions_gpu[:, cur_col] = new_act
+                    cur_col += 1
 
-                    # Update occupied mask
-                    occupied[torch.arange(b, device=self.device),
-                             new_act.to(self.device)] = True
-
+                torch.cuda.synchronize()
                 python_time += time.perf_counter() - t0
 
-                # --- Send to C++ ---
-                actions_block = np.array(all_actions, dtype=np.int32)
-                assert actions_block.shape == (b, page)
+                # Transfer actions to CPU once
+                actions_np = actions_gpu.cpu().numpy()
+                del kv_cache
 
                 t1 = time.perf_counter()
                 results = self.pool.execute_block(
-                    np.array(micro_indices, dtype=np.int32), actions_block
+                    np.array(micro_indices, dtype=np.int32), actions_np
                 )
                 cpp_time += time.perf_counter() - t1
 
-                # --- Process C++ results ---
+                # Process results
                 for j, idx in enumerate(micro_indices):
                     end_step = int(results[j, 0])
                     result = int(results[j, 1])
-                    end_reason = int(results[j, 2])  # 1=win, 2=illegal, 3=draw
+                    end_reason = int(results[j, 2])
 
-                    # Build full timeline: L existing steps + this block's actions
                     pos_seq = []
                     plr_seq = []
                     if L > 0:
@@ -175,31 +160,22 @@ class SelfPlayRunner:
                         plr_seq = [pl for _, pl in seq]
 
                     if end_step >= 0:
-                        # Game ended within this block
                         actual_len = L + end_step + 1
-
-                        # Compute reward sign from black's perspective
-                        if result == 1:    r_black = 1.0
-                        elif result == 2:  r_black = -1.0
-                        else:              r_black = 0.0
+                        r_black = 1.0 if result == 1 else (-1.0 if result == 2 else 0.0)
 
                         rewards = []
-
-                        # Rewards for existing history (L moves, all valid)
                         for _, pl in (sequences[idx] if L > 0 else []):
                             rewards.append(r_black if pl == 0 else -r_black)
 
-                        # Rewards for this block's page actions
                         for k in range(page):
-                            action = int(actions_block[j, k])
+                            action = int(actions_np[j, k])
                             player = (L + k) % 2
                             pos_seq.append(action)
                             plr_seq.append(player)
                             if k <= end_step:
-                                reward = r_black if player == 0 else -r_black
+                                rewards.append(r_black if player == 0 else -r_black)
                             else:
-                                reward = 0.0
-                            rewards.append(reward)
+                                rewards.append(0.0)
 
                         trajectories.append({
                             "positions": torch.tensor(pos_seq, dtype=torch.long),
@@ -210,16 +186,12 @@ class SelfPlayRunner:
                             "result": result,
                             "end_reason": end_reason,
                         })
-
                         sequences.pop(idx, None)
                     else:
-                        # Game continues — store this block's timeline
                         for k in range(page):
                             sequences[idx].append(
-                                (int(actions_block[j, k]), (L + k) % 2)
+                                (int(actions_np[j, k]), (L + k) % 2)
                             )
-
-                del kv_cache
 
         self.timing["python"] = python_time
         self.timing["cpp"] = cpp_time

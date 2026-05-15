@@ -1,7 +1,5 @@
-import gc
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 import math
 import time
@@ -39,13 +37,6 @@ class Trainer:
 
     def train_step(self, step: int, total_steps: int, max_batches: int | None = None,
                    ppl_interval: int = 10):
-        """One training step.
-
-        Args:
-            ppl_interval: log perplexity every N batches.
-        Returns:
-            metrics dict with extra 'ppl_curve' and 'ppl_by_len'.
-        """
         metrics = {}
 
         # Phase 1: Self-play
@@ -53,8 +44,6 @@ class Trainer:
         self.model.eval()
         trajectories = self.runner.run_one_wave()
         metrics["perf/self_play_time"] = time.perf_counter() - t0
-        torch.cuda.empty_cache()
-        gc.collect()
         metrics["perf/raw_games"] = len(trajectories)
         metrics["perf/python_infer"] = self.runner.timing["python"]
         metrics["perf/cpp_time_ms"] = self.runner.timing["cpp"] * 1000
@@ -86,42 +75,35 @@ class Trainer:
         total_entropy = 0.0
         n_batches = 0
         n_valid_moves = 0
-        ppl_curve = []  # (batch_idx, perplexity)
-        loss_curve = []  # (batch_idx, loss)
+        ppl_curve = []
+        loss_curve = []
 
         ent_coef = self._entropy_coef(step, total_steps)
         self.optimizer.zero_grad()
 
         for batch in dataloader:
-            pos = batch["positions"].to(self.device)
-            plr = batch["players"].to(self.device)
-            act = batch["actions"].to(self.device)
-            rew = batch["rewards"].to(self.device)
-            mask = batch["mask"].to(self.device)
-
+            pos = batch["positions"].to(self.device, non_blocking=True)
+            plr = batch["players"].to(self.device, non_blocking=True)
+            act = batch["actions"].to(self.device, non_blocking=True)
+            rew = batch["rewards"].to(self.device, non_blocking=True)
+            mask = batch["mask"].to(self.device, non_blocking=True)
             B, L = pos.shape
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = self.model(pos, plr)  # (B, L, n_positions)
+                logits = self.model(pos, plr)
 
-            # --- CRITICAL FIX: shift logits and targets by 1 ---
-            # logits[:, t, :] is computed from positions[:, 0..t] (causal attention),
-            # so it should predict the *next* action positions[:, t+1].
-            # Previously we trained it to predict positions[:, t], which leaks the
-            # current token and causes the model to learn "copy the last input",
-            # leading to 100% illegal moves (copying opponent's last move).
             if L > 1:
-                pred_logits = logits[:, :-1, :].contiguous()   # (B, L-1, n_positions)
-                pred_act    = act[:, 1:].contiguous()          # (B, L-1)
-                pred_rew    = rew[:, 1:].contiguous()          # (B, L-1)
-                pred_mask   = mask[:, 1:].contiguous()         # (B, L-1)
+                pred_logits = logits[:, :-1, :].contiguous()
+                pred_act    = act[:, 1:].contiguous()
+                pred_rew    = rew[:, 1:].contiguous()
+                pred_mask   = mask[:, 1:].contiguous()
 
-                # Build action mask on CPU, then move: (B, L, n_pos) too large on GPU
+                # Build action mask on GPU with scatter + cummax
                 n_pos = logits.size(-1)
-                oh = torch.zeros(B, L, n_pos, dtype=torch.bool)
-                oh[torch.arange(B).unsqueeze(1), torch.arange(L).unsqueeze(0), pos.cpu()] = True
-                occ_cum = oh.cummax(dim=1).values  # (B, L, n_positions)
-                action_mask = occ_cum[:, :-1, :].to(self.device)
+                oh = torch.zeros(B, L, n_pos, dtype=torch.bool, device=self.device)
+                oh.scatter_(2, pos.unsqueeze(-1), True)
+                occ_cum = oh.cummax(dim=1).values
+                action_mask = occ_cum[:, :-1, :]
             else:
                 pred_logits = logits.new_empty(B, 0, logits.size(-1))
                 pred_act    = act.new_empty(B, 0)
@@ -129,19 +111,15 @@ class Trainer:
                 pred_mask   = mask.new_empty(B, 0)
                 action_mask = None
 
-            # Perplexity logging on shifted predictions
-            if n_batches % ppl_interval == 0:
+            if n_batches % ppl_interval == 0 and pred_logits.size(1) > 0:
                 with torch.no_grad():
-                    if pred_logits.size(1) > 0:
-                        probs = torch.softmax(pred_logits.float(), dim=-1)
-                        log_probs = torch.log_softmax(pred_logits.float(), dim=-1)
-                        ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)
-                        valid_ent = ent[pred_mask]
-                        if valid_ent.numel() > 0:
-                            ppl = valid_ent.mean().exp().item()
-                            ppl_curve.append((n_batches, ppl))
+                    probs = torch.softmax(pred_logits.float(), dim=-1)
+                    log_probs = torch.log_softmax(pred_logits.float(), dim=-1)
+                    ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)
+                    valid_ent = ent[pred_mask]
+                    if valid_ent.numel() > 0:
+                        ppl_curve.append((n_batches, valid_ent.mean().exp().item()))
 
-            # Flatten shifted predictions for loss computation
             pred_logits_flat = pred_logits.reshape(-1, pred_logits.size(-1)).float()
             pred_act_flat    = pred_act.reshape(-1)
             pred_rew_flat    = pred_rew.reshape(-1)
@@ -153,8 +131,6 @@ class Trainer:
                 ent_coef, self.loss_scale, action_mask=action_mask_flat,
             )
 
-            # Also train first_move_logits (not used in forward(), sampled via
-            # multinomial during self-play, so it gets no gradient otherwise).
             first_mask = mask[:, 0]
             if first_mask.any():
                 fm_logits = self.model.first_move_logits.unsqueeze(0).expand(B, -1)
@@ -195,23 +171,15 @@ class Trainer:
         metrics["ppl_curve"] = ppl_curve
         metrics["loss_curve"] = loss_curve
 
-        # Phase 3: Perplexity by sequence position (on one batch, no grad)
         ppl_by_len = self._eval_ppl_by_len(trajectories[:1024])
         metrics["ppl_by_len"] = ppl_by_len
-
-        # Free memory: drop trajectory references and clear CUDA cache
-        del trajectories
-        torch.cuda.empty_cache()
-        gc.collect()
 
         return metrics
 
     @torch.no_grad()
     def _eval_ppl_by_len(self, trajectories: list[dict]):
-        """Compute mean perplexity at each sequence position."""
         self.model.eval()
 
-        # Build a batch from trajectories (use raw, no augment)
         dataloader = create_dataloader(
             trajectories, batch_size=512, augment=False, shuffle=False,
         )
@@ -220,7 +188,6 @@ class Trainer:
         pos = batch["positions"].to(self.device)
         plr = batch["players"].to(self.device)
         mask = batch["mask"].to(self.device)
-
         B, L = pos.shape
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -228,11 +195,8 @@ class Trainer:
 
         probs = torch.softmax(logits, dim=-1)
         log_probs = torch.log_softmax(logits, dim=-1)
-        ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)  # (B, L)
+        ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)
 
-        # Average entropy per sequence position.
-        # logits[:, i, :] predicts action[:, i+1], so we mask on whether the
-        # next action exists.
         ppl_by_len = []
         for i in range(min(L - 1, 225)):
             next_mask = mask[:, i + 1]
