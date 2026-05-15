@@ -30,3 +30,4 @@ checkpoints/
 *.log
 wandb/
 output/
+elo_cache.json
