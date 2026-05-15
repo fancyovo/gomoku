@@ -122,6 +122,7 @@ def main():
             f"ent={metrics['loss/entropy']:.3f} | "
             f"ppl(0)={ppl_pos0:.0f} ppl(-1)={ppl_last:.0f} | "
             f"len={metrics['game/avg_len']:.1f} | "
+            f"ill={metrics['game/illegal_rate']:.1%} | "
             f"win_b={metrics['game/black_winrate']:.2%} | "
             f"games={metrics['perf/raw_games']} | "
             f"sp={metrics['perf/self_play_time']:.0f}s "
