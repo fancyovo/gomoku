@@ -49,6 +49,7 @@ def main():
     logger = WandbLogger(
         project=config.get("wandb", {}).get("project", "gomoku-transformer"),
         entity=config.get("wandb", {}).get("entity"),
+        name=config.get("wandb", {}).get("name"),
         config=config,
         enabled=use_wandb,
     )

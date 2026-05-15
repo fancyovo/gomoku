@@ -9,6 +9,7 @@ class WandbLogger:
         project: str = "gomoku-transformer",
         entity: Optional[str] = None,
         config: Optional[dict] = None,
+        name: Optional[str] = None,
         enabled: bool = True,
     ):
         self.enabled = enabled
@@ -17,7 +18,7 @@ class WandbLogger:
         if not enabled:
             return
 
-        wandb.init(project=project, entity=entity, config=config)
+        wandb.init(project=project, entity=entity, config=config, name=name)
 
     def log(self, metrics: dict, step: int):
         if not self.enabled:

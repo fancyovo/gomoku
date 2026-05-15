@@ -28,4 +28,5 @@ training:
 # wandb logging (set WANDB_API_KEY env var, not here)
 wandb:
   project: "gomoku-transformer"
-  entity: null  # set to your wandb username
+  entity: null
+  name: null  # run name, null = auto-generated
