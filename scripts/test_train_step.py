@@ -50,30 +50,42 @@ def main():
     print(f"  Black win%:  {metrics['game/black_winrate']:.2%}")
     print(f"  Avg length:  {metrics['game/avg_len']:.1f}")
 
-    # Perplexity curve during training
+    # Perplexity and loss curves during training
     ppl_curve = metrics["ppl_curve"]
+    loss_curve = metrics.get("loss_curve", [])
     batches, ppls = zip(*ppl_curve) if ppl_curve else ([], [])
+    loss_batches, losses = zip(*loss_curve) if loss_curve else ([], [])
 
     # Perplexity by sequence length
     ppl_by_len = metrics["ppl_by_len"]
     lens, len_ppls = zip(*ppl_by_len) if ppl_by_len else ([], [])
 
     # --- Plot ---
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 
-    # Left: perplexity vs training progress
+    # Left: loss vs training progress
     ax = axes[0]
+    if loss_batches:
+        ax.plot(loss_batches, losses, "r.-", markersize=4)
+    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.3)
+    ax.set_xlabel("Batch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss during training")
+    ax.grid(True, alpha=0.3)
+
+    # Middle: perplexity vs training progress
+    ax = axes[1]
     if batches:
         ax.plot(batches, ppls, "b.-", markersize=4)
     ax.axhline(y=225, color="gray", linestyle="--", alpha=0.5, label="225 (uniform)")
     ax.set_xlabel("Batch")
     ax.set_ylabel("Perplexity exp(entropy)")
-    ax.set_title("Perplexity during training (per-batch)")
+    ax.set_title("Perplexity during training")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     # Right: perplexity vs sequence length
-    ax = axes[1]
+    ax = axes[2]
     if lens:
         ax.plot(lens, len_ppls, "r.-", markersize=4)
         # Expected: 225 - remaining_cells = 225 - (225 - i) = i ...

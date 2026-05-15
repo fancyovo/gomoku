@@ -24,6 +24,7 @@ class Trainer:
 
         self.entropy_coef = config["entropy_coef"]
         self.entropy_coef_min = config["entropy_coef_min"]
+        self.loss_scale = config.get("loss_scale", 1.0)
         self.grad_clip = config["grad_clip"]
         self.augment = config.get("augment", True)
 
@@ -79,8 +80,7 @@ class Trainer:
         n_batches = 0
         n_valid_moves = 0
         ppl_curve = []  # (batch_idx, perplexity)
-        entropy_by_position = None  # will accumulate per-position entropy
-        count_by_position = None
+        loss_curve = []  # (batch_idx, loss)
 
         ent_coef = self._entropy_coef(step, total_steps)
         self.optimizer.zero_grad()
@@ -116,11 +116,13 @@ class Trainer:
             mask_flat = mask.reshape(B * L)
 
             loss, policy_loss, entropy = reinforce_loss(
-                logits_flat, act_flat, rew_flat, mask_flat, ent_coef
+                logits_flat, act_flat, rew_flat, mask_flat, ent_coef, self.loss_scale,
             )
             loss.backward()
 
             total_loss += loss.item()
+            if n_batches % ppl_interval == 0:
+                loss_curve.append((n_batches, loss.item()))
             total_policy += policy_loss.item()
             total_entropy += entropy.item()
             n_valid_moves += mask_flat.sum().item()
@@ -145,6 +147,7 @@ class Trainer:
         avg_policy = total_policy / max(n_batches, 1)
         metrics["policy/perplexity"] = math.exp(max(avg_policy, -10))
         metrics["ppl_curve"] = ppl_curve
+        metrics["loss_curve"] = loss_curve
 
         # Phase 3: Perplexity by sequence position (on one batch, no grad)
         ppl_by_len = self._eval_ppl_by_len(trajectories[:1024])

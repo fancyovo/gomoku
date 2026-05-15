@@ -8,6 +8,7 @@ def reinforce_loss(
     rewards: torch.Tensor,
     mask: torch.Tensor | None = None,
     entropy_coef: float = 0.01,
+    loss_scale: float = 1.0,
 ):
     """
     REINFORCE policy gradient loss with entropy bonus.
@@ -42,5 +43,5 @@ def reinforce_loss(
     entropy = -(probs * log_probs).sum(dim=-1).mean()
     entropy_loss = -entropy_coef * entropy
 
-    loss = policy_loss + entropy_loss
+    loss = policy_loss * loss_scale + entropy_loss
     return loss, policy_loss.detach(), entropy.detach()
