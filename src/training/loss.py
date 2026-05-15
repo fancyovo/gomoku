@@ -6,28 +6,39 @@ def reinforce_loss(
     logits: torch.Tensor,
     actions: torch.Tensor,
     rewards: torch.Tensor,
+    mask: torch.Tensor | None = None,
     entropy_coef: float = 0.01,
 ):
     """
     REINFORCE policy gradient loss with entropy bonus.
 
     Args:
-        logits:       (n_moves, n_positions) — model output logits
-        actions:      (n_moves,) — chosen action indices
-        rewards:      (n_moves,) — +1/-1 terminal reward per move
+        logits:       (N, n_positions) — model output logits
+        actions:      (N,) — chosen action indices
+        rewards:      (N,) — +1/-1/0 terminal reward per move
+        mask:         (N,) — True for valid positions (non-padding, reward may be 0 for
+                           padding after game end, but those are excluded by mask)
         entropy_coef: weight for entropy bonus
 
     Returns:
         (loss, policy_loss, entropy) tuple
     """
+    if mask is not None:
+        logits = logits[mask]
+        actions = actions[mask]
+        rewards = rewards[mask]
+
+    if len(actions) == 0:
+        return torch.tensor(0.0, device=logits.device), \
+               torch.tensor(0.0, device=logits.device), \
+               torch.tensor(0.0, device=logits.device)
+
     log_probs = F.log_softmax(logits, dim=-1)
     probs = torch.softmax(logits, dim=-1)
 
-    # Policy gradient: -log_prob * reward
-    selected_log_probs = log_probs[torch.arange(len(actions)), actions]
+    selected_log_probs = log_probs[torch.arange(len(actions), device=actions.device), actions]
     policy_loss = -(selected_log_probs * rewards).mean()
 
-    # Entropy bonus: encourage exploration
     entropy = -(probs * log_probs).sum(dim=-1).mean()
     entropy_loss = -entropy_coef * entropy
 
