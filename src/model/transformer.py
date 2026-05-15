@@ -197,12 +197,11 @@ class CausalSelfAttention(nn.Module):
             dropout_p=0.0,
         )
 
-        # Store K, V in cache
-        for i, idx in enumerate(indices):
-            cache_len = s
-            cache.k[layer_idx][idx, :, :cache_len, :] = k[i]
-            cache.v[layer_idx][idx, :, :cache_len, :] = v[i]
-            cache.seq_lens[idx] = cache_len
+        # Store K, V in cache (vectorized — all games have same length s)
+        idx_t = torch.as_tensor(indices, device=x.device)
+        cache.k[layer_idx][idx_t, :, :s, :] = k
+        cache.v[layer_idx][idx_t, :, :s, :] = v
+        cache.seq_lens[idx_t] = s
 
         out = out.transpose(1, 2).reshape(b, s, d)
         return self.proj(out)
