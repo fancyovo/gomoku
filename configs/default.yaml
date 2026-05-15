@@ -15,7 +15,7 @@ training:
   entropy_coef: 0.01
   entropy_coef_min: 0.001
   grad_clip: 1.0
-  games_per_step: 131072
+  games_per_step: 32768
   page_size: 32
   base_batch: 4096
   base_seq_len: 128
