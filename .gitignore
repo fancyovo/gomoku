@@ -37,3 +37,4 @@ checkpoints/fixed_entropy/
 checkpoints/reward_decay/
 checkpoints/augment/
 checkpoints/scale_up/
+memory/
