@@ -192,8 +192,7 @@ def cache_key(a_name, b_name):
 def cross_key(exp_a, a_name, exp_b, b_name):
     sa = int(a_name.split("_")[1].split(".")[0])
     sb = int(b_name.split("_")[1].split(".")[0])
-    ea = exp_a.replace("/", "_"); eb = exp_b.replace("/", "_")
-    return f"{ea}:{sa}_{eb}:{sb}"
+    return f"{exp_a}:{sa}|{exp_b}:{sb}"  # | cannot appear in path names
 
 CROSS_CACHE = os.path.join(CACHE_DIR, "_cross.json")
 
@@ -227,10 +226,12 @@ def plot_all(watch_dirs, games_per_pair):
         for key, val in cc.items():
             if key == "_meta": continue
             wa, wb, d = val
-            # key format: "expA:stepA_expB:stepB"
-            parts = key.split("_")
-            a = parts[0]  # "expA:stepNNNNNN"
-            b = parts[1]  # "expB:stepMMMMMM"
+            # key format: "expA:stepA|expB:stepB"
+            a_raw, b_raw = key.split("|")
+            ea, sa = a_raw.split(":")
+            eb, sb = b_raw.split(":")
+            a = f"{ea}:step_{int(sa):06d}"
+            b = f"{eb}:step_{int(sb):06d}"
             all_results.append((a, b, wa + d*0.5, wb + d*0.5))
 
     joint_elo = compute_elo(all_results) if all_results else {}
