@@ -63,14 +63,21 @@ def load_model(cfg, path, device):
 
 @torch.inference_mode()
 def play_batch(model_a, model_b, b, a_black, device):
-    # GPU state: sequences + occupied mask for inference
+    # GPU state
     positions = torch.zeros(b, 0, dtype=torch.long, device=device)
     players   = torch.zeros(b, 0, dtype=torch.long, device=device)
     occupied  = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)
     active    = torch.ones(b, dtype=torch.bool, device=device)
 
-    # CPU state: C++ boards for fast win detection
-    boards = [gomoku_cpp.Board() for _ in range(b)]
+    # C++ batch processor
+    pool = gomoku_cpp.GamePool(b)
+    PAGE = 32
+    all_done = torch.zeros(b, dtype=torch.bool, device=device)  # already finished
+    winners  = torch.zeros(b, dtype=torch.long, device=device)
+
+    idx_batch = torch.arange(b, device=device)
+    accum_acts = torch.zeros(b, PAGE, dtype=torch.int32)  # action buffer
+    accum_cnt = 0
 
     # First move (black)
     fm_a = model_a.first_move_logits.unsqueeze(0).expand(b, -1)
@@ -79,13 +86,30 @@ def play_batch(model_a, model_b, b, a_black, device):
     fm = fm.masked_fill(occupied, -1e9)
     probs = torch.softmax(fm.float(), dim=-1)
     first = torch.multinomial(probs, 1).squeeze(-1)
-    idx_batch = torch.arange(b, device=device)
     occupied[idx_batch, first] = True
     positions = first.unsqueeze(1)
     players = torch.zeros(b, 1, dtype=torch.long, device=device)
-    # Apply to C++ boards
-    for i in range(b):
-        boards[i].play_move(first[i].item())
+    accum_acts[:, 0] = first.cpu().int()
+    accum_cnt = 1
+
+    def flush_cpp():
+        nonlocal accum_cnt
+        if accum_cnt == 0: return
+        pad = accum_acts[:, :accum_cnt].cpu().numpy()  # (b, accum_cnt)
+        # Flatten to (b * accum_cnt), send to C++ in pages of 32
+        indices_np = np.arange(b, dtype=np.int32)
+        for pg_start in range(0, accum_cnt, PAGE):
+            pg_end = min(pg_start + PAGE, accum_cnt)
+            pg_acts = np.zeros((b, PAGE), dtype=np.int32)
+            pg_acts[:, :pg_end - pg_start] = pad[:, pg_start:pg_end]
+            results = pool.execute_block(indices_np, pg_acts)
+            for i in range(b):
+                if all_done[i]: continue
+                es = int(results[i, 0])
+                if es >= 0:
+                    all_done[i] = True
+                    winners[i] = int(results[i, 1])
+        accum_cnt = 0
 
     for step in range(1, N_CELLS):
         cp = step % 2
@@ -111,24 +135,24 @@ def play_batch(model_a, model_b, b, a_black, device):
         probs = torch.softmax(logits, dim=-1)
         actions = torch.multinomial(probs, 1).squeeze(-1)
 
-        # Update GPU occupied mask
-        occupied[active] = occupied[active].scatter_(1, actions[active].unsqueeze(1), True)
+        occupied[~all_done] = occupied[~all_done].scatter_(
+            1, actions[~all_done].unsqueeze(1), True)
         positions = torch.cat([positions, actions.unsqueeze(1)], dim=1)
         players = torch.cat([players, torch.full((b, 1), cp, dtype=torch.long, device=device)], dim=1)
 
-        # Update C++ boards + check wins
-        for i in range(b):
-            if not active[i]: continue
-            boards[i].play_move(actions[i].item())
-            if boards[i].result != 0:
-                active[i] = False
+        accum_acts[:, accum_cnt] = actions.cpu().int()
+        accum_cnt += 1
+        if accum_cnt == PAGE:
+            flush_cpp()
+            if all_done.all(): break
 
-        if not active.any(): break
+    flush_cpp()
+    # Any remaining active games are draws
+    winners[(winners == 0) & ~all_done] = 3
 
     wins_a = wins_b = draws = 0
     for i in range(b):
-        r = boards[i].result
-        w = 1 if r == 1 else (2 if r == 2 else 3)
+        w = winners[i].item()
         if w == 1: wins_a += 1 if a_black[i] else 0; wins_b += 0 if a_black[i] else 1
         elif w == 2: wins_a += 0 if a_black[i] else 1; wins_b += 1 if a_black[i] else 0
         else: draws += 1
@@ -165,6 +189,14 @@ def cache_key(a_name, b_name):
     sb = int(b_name.split("_")[1].split(".")[0])
     return f"{min(sa,sb)}_{max(sa,sb)}"
 
+def cross_key(exp_a, a_name, exp_b, b_name):
+    sa = int(a_name.split("_")[1].split(".")[0])
+    sb = int(b_name.split("_")[1].split(".")[0])
+    ea = exp_a.replace("/", "_"); eb = exp_b.replace("/", "_")
+    return f"{ea}:{sa}_{eb}:{sb}"
+
+CROSS_CACHE = os.path.join(CACHE_DIR, "_cross.json")
+
 
 # ── Plot ────────────────────────────────────────────────────
 
@@ -174,31 +206,56 @@ def plot_all(watch_dirs, games_per_pair):
         import matplotlib.pyplot as plt
     except ImportError: return
 
+    # Collect ALL match results (intra + cross) for joint ELO
+    all_results = []
+    for d in watch_dirs:
+        exp = os.path.basename(d.rstrip("/"))
+        cp = cache_path(d)
+        if os.path.exists(cp):
+            cache = load_cache(cp)
+            for key, val in cache.items():
+                if key == "_meta": continue
+                wa, wb, d = val
+                s1, s2 = key.split("_")
+                a = f"{exp}:step_{int(s1):06d}"
+                b = f"{exp}:step_{int(s2):06d}"
+                all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+
+    # Add cross-experiment results
+    if os.path.exists(CROSS_CACHE):
+        cc = load_cache(CROSS_CACHE)
+        for key, val in cc.items():
+            if key == "_meta": continue
+            wa, wb, d = val
+            # key format: "expA:stepA_expB:stepB"
+            parts = key.split("_")
+            a = parts[0]  # "expA:stepNNNNNN"
+            b = parts[1]  # "expB:stepMMMMMM"
+            all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+
+    joint_elo = compute_elo(all_results) if all_results else {}
+
     fig, ax = plt.subplots(figsize=(12, 6))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(watch_dirs), 1)))
 
     for di, d in enumerate(watch_dirs):
         exp = os.path.basename(d.rstrip("/"))
-        cp = cache_path(d)
-        if not os.path.exists(cp): continue
-        cache = load_cache(cp)
-        match_results = []
-        for key, val in cache.items():
-            if key == "_meta": continue
-            wa, wb, d = val
-            s1, s2 = key.split("_")
-            a = f"step_{int(s1):06d}.pt"; b = f"step_{int(s2):06d}.pt"
-            match_results.append((a, b, wa + d*0.5, wb + d*0.5))
-        if len(match_results) < 1: continue
-
-        elo = compute_elo(match_results)
-        steps = sorted(int(k.split("_")[1].split(".")[0]) for k in elo)
-        ratings = [elo[f"step_{s:06d}.pt"] for s in steps]
-        ax.plot(steps, ratings, ".-", color=colors[di], markersize=3, linewidth=1.5, label=exp)
+        # Extract per-experiment ELO from joint ELO
+        exp_elo = {}
+        for name, rating in joint_elo.items():
+            if name.startswith(exp + ":"):
+                step_str = name.split(":step_")[1]
+                exp_elo[int(step_str)] = rating
+        if not exp_elo:
+            continue
+        steps = sorted(exp_elo.keys())
+        ratings = [exp_elo[s] for s in steps]
+        ax.plot(steps, ratings, ".-", color=colors[di], markersize=3,
+                linewidth=1.5, label=exp)
 
     ax.axhline(y=1500, color="gray", linestyle="--", alpha=0.3)
     ax.set_xlabel("Training Step"); ax.set_ylabel("ELO Rating")
-    ax.set_title(f"ELO Comparison ({games_per_pair} games/pair)")
+    ax.set_title(f"ELO Comparison ({games_per_pair} games/pair, joint calibration)")
     ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
     os.makedirs("output", exist_ok=True)
@@ -269,15 +326,30 @@ def main():
           f"n_layers={model_cfg_raw['n_layers']}")
     print()
 
+    # Per-experiment model configs (different architectures)
+    exp_configs = {}
+    # Detect scale_up config
+    scale_up_cfg = None
+    if os.path.exists("configs/abl_scale_up.yaml"):
+        with open("configs/abl_scale_up.yaml") as f:
+            sc = yaml.safe_load(f)
+            scale_up_cfg = ModelConfig.from_dict(sc["model"])
+
+    def get_model_cfg(dir_path):
+        exp = os.path.basename(dir_path.rstrip("/"))
+        if exp == "scale_up" and scale_up_cfg is not None:
+            return scale_up_cfg
+        return model_cfg
+
     # Model cache — loaded on demand per directory
     model_cache = {}
 
-    def get_model(dir_path, ckpt_name, load_new=True):
+    def get_model(dir_path, ckpt_name):
         key = (dir_path, ckpt_name)
         if key not in model_cache:
             path = os.path.join(dir_path, ckpt_name)
-            model_cache[key] = load_model(model_cfg, path, device)
-            # Limit model cache size
+            cfg = get_model_cfg(dir_path)
+            model_cache[key] = load_model(cfg, path, device)
             if len(model_cache) > 32:
                 oldest = list(model_cache.keys())[0]
                 del model_cache[oldest]
@@ -285,40 +357,74 @@ def main():
         return model_cache[key]
 
     while True:
-        # Collect all missing pairs across all directories
-        all_missing = []
+        # Collect intra-experiment missing pairs
+        intra_missing = []
         for d in args.watch_dir:
             cache = load_cache(cache_path(d))
-            missing = missing_pairs(d, cache)
-            for a, b in missing:
-                all_missing.append((d, a, b))
+            for a, b in missing_pairs(d, cache):
+                intra_missing.append(("intra", d, d, a, b))
 
-        if all_missing:
-            # Randomly pick one pair to evaluate
-            d, a_name, b_name = random.choice(all_missing)
-            exp = os.path.basename(d.rstrip("/"))
-            cache = load_cache(cache_path(d))
-            key = cache_key(a_name, b_name)
-            if key in cache:  # race condition guard
-                continue
+        # Collect cross-experiment missing pairs (sample up to 100)
+        cross_missing = []
+        cross_cache = load_cache(CROSS_CACHE)
+        if len(args.watch_dir) >= 2:
+            dirs_with_ckpts = [d for d in args.watch_dir if all_ckpts(d)]
+            for _ in range(100):
+                if len(dirs_with_ckpts) < 2: break
+                da, db = random.sample(dirs_with_ckpts, 2)
+                ckpts_a = all_ckpts(da)
+                ckpts_b = all_ckpts(db)
+                if not ckpts_a or not ckpts_b: continue
+                a = random.choice(ckpts_a)
+                b = random.choice(ckpts_b)
+                key = cross_key(da, a, db, b)
+                if key not in cross_cache:
+                    cross_missing.append(("cross", da, db, a, b))
 
-            model_a = get_model(d, a_name)
-            model_b = get_model(d, b_name)
-            print(f"[{time.strftime('%H:%M:%S')}] {exp}: {a_name} vs {b_name} ...",
-                  end=" ", flush=True)
-
-            wa, wb, dg = play_match(model_a, model_b, games_per_pair, args.batch, device)
-            cache[key] = (wa, wb, dg)
-            save_cache(cache_path(d), cache)
-            wr = wa/(wa+wb) if wa+wb>0 else 0.5
-            print(f"{wa}-{wb} (D={dg}) WR={wr:.2%}")
-
-        # Plot all
-        plot_all(args.watch_dir, games_per_pair)
-
-        if not all_missing:
+        # Pick one pair: 70% intra, 30% cross (if both available)
+        pool = intra_missing + cross_missing
+        if not pool:
             time.sleep(args.interval)
-        # If there were missing pairs, loop immediately to pick another
+            plot_all(args.watch_dir, games_per_pair)
+            continue
+
+        # Prefer cross-experiment occasionally for ELO anchoring
+        if cross_missing and (not intra_missing or random.random() < 0.3):
+            choice = random.choice(cross_missing)
+        else:
+            choice = random.choice(intra_missing)
+
+        kind, da, db, a_name, b_name = choice
+        exp_a = os.path.basename(da.rstrip("/"))
+        exp_b = os.path.basename(db.rstrip("/"))
+
+        if kind == "intra":
+            cache = load_cache(cache_path(da))
+            key = cache_key(a_name, b_name)
+            tag = exp_a
+        else:
+            cache = cross_cache
+            key = cross_key(da, a_name, db, b_name)
+            tag = f"{exp_a} vs {exp_b}"
+
+        if key in cache:
+            continue
+
+        model_a = get_model(da, a_name)
+        model_b = get_model(db, b_name)
+        print(f"[{time.strftime('%H:%M:%S')}] {tag}: {a_name} vs {b_name} ...",
+              end=" ", flush=True)
+
+        wa, wb, dg = play_match(model_a, model_b, games_per_pair, args.batch, device)
+        cache[key] = (wa, wb, dg)
+        if kind == "intra":
+            save_cache(cache_path(da), cache)
+        else:
+            save_cache(CROSS_CACHE, cache)
+        wr = wa/(wa+wb) if wa+wb>0 else 0.5
+        print(f"{wa}-{wb} (D={dg}) WR={wr:.2%}")
+
+        plot_all(args.watch_dir, games_per_pair)
 
 
 if __name__ == "__main__":
