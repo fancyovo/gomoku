@@ -454,6 +454,14 @@ def main():
             a_name = loaded_models[a_idx][0]
             b_name = loaded_models[b_idx][0]
             results[(a_name, b_name)] = (wa, wb, dg)
+
+        # Free KV caches immediately — iterate over all layers
+        for cache in caches:
+            for k in cache.k: del k
+            for v in cache.v: del v
+            cache.k.clear(); cache.v.clear()
+        del caches
+        torch.cuda.empty_cache()
         return results
 
     # ── Main sampling loop ─────────────────────────────────────
