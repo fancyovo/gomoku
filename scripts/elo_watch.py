@@ -205,62 +205,71 @@ def plot_all(watch_dirs, games_per_pair):
         import matplotlib.pyplot as plt
     except ImportError: return
 
-    # Collect ALL match results (intra + cross) for joint ELO
-    all_results = []
-    for d in watch_dirs:
-        exp = os.path.basename(d.rstrip("/"))
-        cp = cache_path(d)
-        if os.path.exists(cp):
+    try:
+        # Collect ALL match results (intra + cross) for joint ELO
+        all_results = []
+        for d in watch_dirs:
+            exp = os.path.basename(d.rstrip("/"))
+            cp = cache_path(d)
+            if not os.path.exists(cp): continue
             cache = load_cache(cp)
             for key, val in cache.items():
                 if key == "_meta": continue
-                wa, wb, d = val
-                s1, s2 = key.split("_")
-                a = f"{exp}:step_{int(s1):06d}"
-                b = f"{exp}:step_{int(s2):06d}"
-                all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+                try:
+                    wa, wb, d = val
+                    s1, s2 = key.split("_")
+                    a = f"{exp}:step_{int(s1):06d}"
+                    b = f"{exp}:step_{int(s2):06d}"
+                    all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+                except (ValueError, IndexError):
+                    pass  # skip malformed entries
 
-    # Add cross-experiment results
-    if os.path.exists(CROSS_CACHE):
-        cc = load_cache(CROSS_CACHE)
-        for key, val in cc.items():
-            if key == "_meta": continue
-            wa, wb, d = val
-            # key format: "expA:stepA|expB:stepB"
-            a_raw, b_raw = key.split("|")
-            ea, sa = a_raw.split(":")
-            eb, sb = b_raw.split(":")
-            a = f"{ea}:step_{int(sa):06d}"
-            b = f"{eb}:step_{int(sb):06d}"
-            all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+        # Add cross-experiment results
+        if os.path.exists(CROSS_CACHE):
+            cc = load_cache(CROSS_CACHE)
+            for key, val in cc.items():
+                if key == "_meta": continue
+                try:
+                    wa, wb, d = val
+                    a_raw, b_raw = key.split("|")
+                    ea, sa = a_raw.split(":")
+                    eb, sb = b_raw.split(":")
+                    a = f"{ea}:step_{int(sa):06d}"
+                    b = f"{eb}:step_{int(sb):06d}"
+                    all_results.append((a, b, wa + d*0.5, wb + d*0.5))
+                except (ValueError, IndexError):
+                    pass
 
-    joint_elo = compute_elo(all_results) if all_results else {}
+        joint_elo = compute_elo(all_results) if all_results else {}
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    colors = plt.cm.tab10(np.linspace(0, 1, max(len(watch_dirs), 1)))
+        fig, ax = plt.subplots(figsize=(12, 6))
+        colors = plt.cm.tab10(np.linspace(0, 1, max(len(watch_dirs), 1)))
 
-    for di, d in enumerate(watch_dirs):
-        exp = os.path.basename(d.rstrip("/"))
-        # Extract per-experiment ELO from joint ELO
-        exp_elo = {}
-        for name, rating in joint_elo.items():
-            if name.startswith(exp + ":"):
-                step_str = name.split(":step_")[1]
-                exp_elo[int(step_str)] = rating
-        if not exp_elo:
-            continue
-        steps = sorted(exp_elo.keys())
-        ratings = [exp_elo[s] for s in steps]
-        ax.plot(steps, ratings, ".-", color=colors[di], markersize=3,
-                linewidth=1.5, label=exp)
+        for di, d in enumerate(watch_dirs):
+            exp = os.path.basename(d.rstrip("/"))
+            exp_elo = {}
+            for name, rating in joint_elo.items():
+                if not name.startswith(exp + ":"): continue
+                try:
+                    step_str = name.split(":step_")[1]
+                    exp_elo[int(step_str)] = rating
+                except (ValueError, IndexError):
+                    pass
+            if not exp_elo: continue
+            steps = sorted(exp_elo.keys())
+            ratings = [exp_elo[s] for s in steps]
+            ax.plot(steps, ratings, ".-", color=colors[di], markersize=3,
+                    linewidth=1.5, label=exp)
 
-    ax.axhline(y=1500, color="gray", linestyle="--", alpha=0.3)
-    ax.set_xlabel("Training Step"); ax.set_ylabel("ELO Rating")
-    ax.set_title(f"ELO Comparison ({games_per_pair} games/pair, joint calibration)")
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+        ax.axhline(y=1500, color="gray", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Training Step"); ax.set_ylabel("ELO Rating")
+        ax.set_title(f"ELO Comparison ({games_per_pair} games/pair, joint calibration)")
+        ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-    os.makedirs("output", exist_ok=True)
-    plt.tight_layout(); plt.savefig(PLOT_FILE, dpi=120); plt.close()
+        os.makedirs("output", exist_ok=True)
+        plt.tight_layout(); plt.savefig(PLOT_FILE, dpi=120); plt.close()
+    except Exception as e:
+        print(f"  Plot error: {e}")
     ts = time.strftime("%H:%M:%S")
     print(f"  [{ts}] Plot updated: {PLOT_FILE}")
 
@@ -386,7 +395,8 @@ def main():
         pool = intra_missing + cross_missing
         if not pool:
             time.sleep(args.interval)
-            plot_all(args.watch_dir, games_per_pair)
+            try: plot_all(args.watch_dir, games_per_pair)
+            except Exception as e: print(f"  Plot error: {e}")
             continue
 
         # Prefer cross-experiment occasionally for ELO anchoring
@@ -425,7 +435,8 @@ def main():
         wr = wa/(wa+wb) if wa+wb>0 else 0.5
         print(f"{wa}-{wb} (D={dg}) WR={wr:.2%}")
 
-        plot_all(args.watch_dir, games_per_pair)
+        try: plot_all(args.watch_dir, games_per_pair)
+        except Exception as e: print(f"  Plot error: {e}")
 
 
 if __name__ == "__main__":
