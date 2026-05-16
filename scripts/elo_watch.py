@@ -20,6 +20,7 @@ import sys
 import time
 import torch
 import numpy as np
+import gomoku_cpp
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from model import ModelConfig, GomokuTransformer
@@ -62,23 +63,29 @@ def load_model(cfg, path, device):
 
 @torch.inference_mode()
 def play_batch(model_a, model_b, b, a_black, device):
+    # GPU state: sequences + occupied mask for inference
     positions = torch.zeros(b, 0, dtype=torch.long, device=device)
     players   = torch.zeros(b, 0, dtype=torch.long, device=device)
     occupied  = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)
-    stones    = torch.zeros(b, N_CELLS, dtype=torch.uint8, device=device)
     active    = torch.ones(b, dtype=torch.bool, device=device)
-    winners   = torch.zeros(b, dtype=torch.long, device=device)
 
+    # CPU state: C++ boards for fast win detection
+    boards = [gomoku_cpp.Board() for _ in range(b)]
+
+    # First move (black)
     fm_a = model_a.first_move_logits.unsqueeze(0).expand(b, -1)
     fm_b = model_b.first_move_logits.unsqueeze(0).expand(b, -1)
     fm = torch.where(a_black.unsqueeze(1), fm_a, fm_b)
     fm = fm.masked_fill(occupied, -1e9)
     probs = torch.softmax(fm.float(), dim=-1)
     first = torch.multinomial(probs, 1).squeeze(-1)
-    idx = torch.arange(b, device=device)
-    occupied[idx, first] = True; stones[idx, first] = 1
+    idx_batch = torch.arange(b, device=device)
+    occupied[idx_batch, first] = True
     positions = first.unsqueeze(1)
     players = torch.zeros(b, 1, dtype=torch.long, device=device)
+    # Apply to C++ boards
+    for i in range(b):
+        boards[i].play_move(first[i].item())
 
     for step in range(1, N_CELLS):
         cp = step % 2
@@ -104,34 +111,24 @@ def play_batch(model_a, model_b, b, a_black, device):
         probs = torch.softmax(logits, dim=-1)
         actions = torch.multinomial(probs, 1).squeeze(-1)
 
-        just_won = torch.zeros(b, dtype=torch.bool, device=device)
+        # Update GPU occupied mask
+        occupied[active] = occupied[active].scatter_(1, actions[active].unsqueeze(1), True)
+        positions = torch.cat([positions, actions.unsqueeze(1)], dim=1)
+        players = torch.cat([players, torch.full((b, 1), cp, dtype=torch.long, device=device)], dim=1)
+
+        # Update C++ boards + check wins
         for i in range(b):
             if not active[i]: continue
-            a = actions[i].item(); r, c = a // BOARD_SIZE, a % BOARD_SIZE
-            for dr, dc in [(0,1),(1,0),(1,1),(1,-1)]:
-                cnt = 1
-                for sign in [1,-1]:
-                    for k in range(1,5):
-                        nr, nc = r+dr*k*sign, c+dc*k*sign
-                        if not (0<=nr<BOARD_SIZE and 0<=nc<BOARD_SIZE): break
-                        if stones[i, nr*BOARD_SIZE+nc].item() != (cp+1): break
-                        cnt += 1
-                if cnt >= 5: just_won[i] = True; break
+            boards[i].play_move(actions[i].item())
+            if boards[i].result != 0:
+                active[i] = False
 
-        occupied[active] = occupied[active].scatter_(1, actions[active].unsqueeze(1), True)
-        stones[active] = stones[active].scatter_(1, actions[active].unsqueeze(1), cp+1)
-        positions = torch.cat([positions, actions.unsqueeze(1)], dim=1)
-        players = torch.cat([players, torch.full((b,1), cp, dtype=torch.long, device=device)], dim=1)
-
-        newly_done = just_won & active
-        winners[newly_done] = cp + 1
-        active[newly_done] = False
         if not active.any(): break
 
-    winners[(winners==0) & ~active] = 3
     wins_a = wins_b = draws = 0
     for i in range(b):
-        w = winners[i].item()
+        r = boards[i].result
+        w = 1 if r == 1 else (2 if r == 2 else 3)
         if w == 1: wins_a += 1 if a_black[i] else 0; wins_b += 0 if a_black[i] else 1
         elif w == 2: wins_a += 0 if a_black[i] else 1; wins_b += 1 if a_black[i] else 0
         else: draws += 1
