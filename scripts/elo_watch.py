@@ -14,7 +14,7 @@ from model import ModelConfig, GomokuTransformer
 
 BOARD_SIZE = 15; N_CELLS = 225; PAGE = 32
 CACHE_DIR = "elo_caches"
-MAX_MOVES = 150
+MAX_MOVES = 80  # most games end by 50-60; cap KV cache at 80 steps
 PLOT_FILE = "output/elo_curve.png"
 MAX_MOVES = 180  # hard cap
 
@@ -459,7 +459,7 @@ def main():
     # ── Main sampling loop ─────────────────────────────────────
 
     # How many models to load per round
-    ACTIVE_MODELS = min(args.n_models, 8)
+    ACTIVE_MODELS = args.n_models
 
     round_num = 0
     while True:
