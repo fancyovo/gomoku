@@ -375,7 +375,7 @@ def main():
         if b == 0: return {}
 
         M = len(loaded_models)
-        caches = [loaded_models[0][1].create_cache(max_games=b, max_cache_len=MAX_MOVES) for _ in range(M)]
+        caches = [loaded_models[mi][1].create_cache(max_games=b, max_cache_len=MAX_MOVES) for mi in range(M)]
         black_m = torch.tensor(black_m_idx, device=device)
         white_m = torch.tensor(white_m_idx, device=device)
         occupied = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)

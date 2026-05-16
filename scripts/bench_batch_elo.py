@@ -34,8 +34,8 @@ def play_multi_model(models, pair_assignments, games_per_dir, device):
 
     # Per-model KV caches
     caches = []
-    for _ in models:
-        caches.append(models[0][1].create_cache(max_games=b, max_cache_len=MAX_MOVES))
+    for mi in range(len(models)):
+        caches.append(models[mi][1].create_cache(max_games=b, max_cache_len=MAX_MOVES))
 
     a_black = torch.tensor([gi[1] for gi in game_info], device=device)
     occupied = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)
