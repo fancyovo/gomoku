@@ -366,6 +366,46 @@ def main():
                 torch.cuda.empty_cache()
         return model_cache[key]
 
+    last_stats_time = 0.0
+    stats_interval = 30.0  # print stats every 30s
+
+    def print_stats():
+        nonlocal last_stats_time
+        now = time.time()
+        if now - last_stats_time < stats_interval:
+            return
+        last_stats_time = now
+        print(f"\n  {'─'*55}")
+        print(f"  {'Experiment':<20s} {'CKPTs':>6s} {'Matched':>8s} {'Total':>8s} {'Done':>7s}")
+        print(f"  {'─'*55}")
+        total_intra_matched = 0; total_intra_pairs = 0
+        for d in args.watch_dir:
+            exp = os.path.basename(d.rstrip("/"))
+            ckpts = all_ckpts(d)
+            n = len(ckpts)
+            total_pairs = n * (n - 1) // 2 if n >= 2 else 0
+            cache = load_cache(cache_path(d))
+            matched = sum(1 for k in cache if k != "_meta")
+            pct = f"{100*matched/total_pairs:.0f}%" if total_pairs > 0 else "-"
+            print(f"  {exp:<20s} {n:6d} {matched:8d} {total_pairs:8d} {pct:>7s}")
+            total_intra_matched += matched; total_intra_pairs += total_pairs
+        # Cross stats
+        cc = load_cache(CROSS_CACHE)
+        cross_matched = sum(1 for k in cc if k != "_meta")
+        n_dirs = len([d for d in args.watch_dir if all_ckpts(d)])
+        cross_total = 0
+        if n_dirs >= 2:
+            for i, da in enumerate(args.watch_dir):
+                for db in args.watch_dir[i+1:]:
+                    cross_total += len(all_ckpts(da)) * len(all_ckpts(db))
+        cross_pct = f"{100*cross_matched/cross_total:.0f}%" if cross_total > 0 else "-"
+        print(f"  {'cross':<20s} {'-':>6s} {cross_matched:8d} {cross_total:8d} {cross_pct:>7s}")
+        overall_matched = total_intra_matched + cross_matched
+        overall_total = total_intra_pairs + cross_total
+        overall_pct = f"{100*overall_matched/overall_total:.0f}%" if overall_total > 0 else "-"
+        print(f"  {'TOTAL':<20s} {'-':>6s} {overall_matched:8d} {overall_total:8d} {overall_pct:>7s}")
+        print(f"  {'─'*55}\n")
+
     while True:
         # Collect intra-experiment missing pairs
         intra_missing = []
@@ -394,6 +434,7 @@ def main():
         # Pick one pair: 70% intra, 30% cross (if both available)
         pool = intra_missing + cross_missing
         if not pool:
+            print_stats()
             time.sleep(args.interval)
             try: plot_all(args.watch_dir, games_per_pair)
             except Exception as e: print(f"  Plot error: {e}")
@@ -435,6 +476,7 @@ def main():
         wr = wa/(wa+wb) if wa+wb>0 else 0.5
         print(f"{wa}-{wb} (D={dg}) WR={wr:.2%}")
 
+        print_stats()
         try: plot_all(args.watch_dir, games_per_pair)
         except Exception as e: print(f"  Plot error: {e}")
 
