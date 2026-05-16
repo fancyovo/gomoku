@@ -352,38 +352,60 @@ def main():
         print(f"  {'─'*55}\n")
 
     while True:
-        intra_missing = []
+        # Build per-checkpoint missing pairs for uniform coverage
+        # intra_ckpt: {d: {ckpt: [(opp_ckpt, a, b), ...]}}
+        intra_ckpt = {}
         for d in args.watch_dir:
             cache = load_cache(cache_path(d))
+            d_ckpts = {}
             for a, b in missing_pairs(d, cache, gpp):
-                intra_missing.append(("intra", d, d, a, b))
+                d_ckpts.setdefault(a, []).append(("intra", d, d, a, b))
+                d_ckpts.setdefault(b, []).append(("intra", d, d, a, b))
+            if d_ckpts:
+                intra_ckpt[d] = d_ckpts
 
-        cross_missing = []
+        # Collect all (dir, ckpt) keys for uniform sampling
+        all_ckpt_keys = []
+        for d, d_ckpts in intra_ckpt.items():
+            for ckpt in d_ckpts:
+                all_ckpt_keys.append((d, ckpt))
+
+        # Pick: 70% intra, 30% cross
+        pick_cross = False
         cross_cache = load_cache(CROSS_CACHE)
-        dirs_with = [d for d in args.watch_dir if all_ckpts(d)]
-        if len(dirs_with) >= 2:
-            for _ in range(100):
-                if len(dirs_with) < 2: break
+        if len(args.watch_dir) >= 2 and random.random() < 0.3:
+            pick_cross = True
+
+        if (not pick_cross or not all_ckpt_keys) and all_ckpt_keys:
+            # Intra: pick random checkpoint, then random opponent
+            d, ckpt = random.choice(all_ckpt_keys)
+            choice = random.choice(intra_ckpt[d][ckpt])
+        elif pick_cross:
+            # Cross: pick two random experiments, then one ckpt from each
+            dirs_with = [d_ for d_ in args.watch_dir if all_ckpts(d_)]
+            if len(dirs_with) >= 2:
                 da, db = random.sample(dirs_with, 2)
                 ca, cb = all_ckpts(da), all_ckpts(db)
-                if not ca or not cb: continue
-                a, b = random.choice(ca), random.choice(cb)
-                key = cross_key(da, a, db, b)
-                if key not in cross_cache or not match_ok(cross_cache.get(key, []), gpp):
-                    cross_missing.append(("cross", da, db, a, b))
+                if ca and cb:
+                    a, b = random.choice(ca), random.choice(cb)
+                    key = cross_key(da, a, db, b)
+                    if key in cross_cache and match_ok(cross_cache.get(key, []), gpp):
+                        choice = None  # already done, fall through
+                    else:
+                        choice = ("cross", da, db, a, b)
+                else:
+                    choice = None
+            else:
+                choice = None
+        else:
+            choice = None
 
-        pool = intra_missing + cross_missing
-        if not pool:
+        if choice is None:
             print_stats()
             time.sleep(args.interval)
             try: plot_all(args.watch_dir, gpp)
             except Exception as e: print(f"  Plot error: {e}")
             continue
-
-        if cross_missing and (not intra_missing or random.random() < 0.3):
-            choice = random.choice(cross_missing)
-        else:
-            choice = random.choice(intra_missing)
 
         kind, da, db, a_name, b_name = choice
         if kind == "intra":
