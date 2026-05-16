@@ -21,7 +21,8 @@ def main():
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--total_steps", type=int, default=1000)
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
+                        help="Checkpoint directory (default from config wandb.name)")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true")
     args = parser.parse_args()
@@ -61,6 +62,11 @@ def main():
 
     # Trainer
     trainer = Trainer(model, config["training"], device)
+
+    # Default checkpoint dir from experiment name
+    if args.checkpoint_dir == "checkpoints":
+        exp_name = config.get("wandb", {}).get("name", "default")
+        args.checkpoint_dir = f"checkpoints/{exp_name}"
 
     start_step = 0
     os.makedirs(args.checkpoint_dir, exist_ok=True)

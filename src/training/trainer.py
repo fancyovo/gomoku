@@ -23,6 +23,8 @@ class Trainer:
 
         self.entropy_coef = config["entropy_coef"]
         self.entropy_coef_min = config["entropy_coef_min"]
+        self.entropy_fixed = config.get("entropy_fixed", None)
+        self.reward_decay_hl = config.get("reward_decay_half_life", None)
         self.loss_scale = config.get("loss_scale", 1.0)
         self.grad_clip = config["grad_clip"]
         self.augment = config.get("augment", True)
@@ -30,10 +32,25 @@ class Trainer:
         self.runner = SelfPlayRunner(model, device, config)
 
     def _entropy_coef(self, step: int, total_steps: int) -> float:
+        if self.entropy_fixed is not None:
+            return self.entropy_fixed
         progress = step / max(total_steps - 1, 1)
         return self.entropy_coef_min + 0.5 * (self.entropy_coef - self.entropy_coef_min) * (
             1.0 + math.cos(math.pi * progress)
         )
+
+    def _apply_reward_decay(self, trajectories: list[dict]):
+        """Apply exponential reward decay in-place."""
+        if self.reward_decay_hl is None:
+            return
+        hl = self.reward_decay_hl
+        decay_factor = 0.5 ** (1.0 / hl)
+        for traj in trajectories:
+            L = traj["actual_len"]
+            rewards = traj["rewards"]
+            for i in range(L):
+                dist_from_end = L - 1 - i
+                rewards[i] *= decay_factor ** dist_from_end
 
     def train_step(self, step: int, total_steps: int, max_batches: int | None = None,
                    ppl_interval: int = 10):
@@ -60,6 +77,8 @@ class Trainer:
         metrics["game/white_winrate"] = n_white_wins / len(trajectories)
         metrics["game/illegal_rate"] = n_illegal / len(trajectories)
         metrics["game/win_rate_5"] = n_win / len(trajectories)
+
+        self._apply_reward_decay(trajectories)
 
         # Phase 2: Training
         t0 = time.perf_counter()

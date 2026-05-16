@@ -1,4 +1,4 @@
-# Gomoku Transformer — Default Configuration
+# Ablation: fixed entropy coefficient (no annealing)
 
 model:
   d_model: 128
@@ -14,8 +14,8 @@ training:
   weight_decay: 0.01
   entropy_coef: 0.01
   entropy_coef_min: 0.001
-  entropy_fixed: null         # if set, freeze entropy at this value (no annealing)
-  reward_decay_half_life: null  # if set, exponential reward decay (half-life in steps)
+  entropy_fixed: 0.005        # freeze entropy at this value
+  reward_decay_half_life: null
   grad_clip: 1.0
   games_per_step: 32768
   page_size: 32
@@ -25,8 +25,7 @@ training:
   augment: false
   checkpoint_interval: 10
 
-# wandb logging (set WANDB_API_KEY env var, not here)
 wandb:
   project: "gomoku-transformer"
   entity: null
-  name: "base"  # experiment name for ELO tracking
+  name: "fixed_entropy"

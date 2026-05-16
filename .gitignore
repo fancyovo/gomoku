@@ -31,3 +31,9 @@ checkpoints/
 wandb/
 output/
 elo_cache.json
+elo_caches/
+checkpoints/base/
+checkpoints/fixed_entropy/
+checkpoints/reward_decay/
+checkpoints/augment/
+checkpoints/scale_up/
