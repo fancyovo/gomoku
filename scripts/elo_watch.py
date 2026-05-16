@@ -481,17 +481,25 @@ def main():
             except Exception as e: print(f"  Plot error: {e}")
             continue
 
-        # Pick ACTIVE_MODELS checkpoints, weighted by missing count
+        # Pick ACTIVE_MODELS checkpoints: 3 weighted + 2 uniform
         keys = list(ckpt_missing.keys())
-        weights = [ckpt_missing[k] for k in keys]
         n_pick = min(ACTIVE_MODELS, len(keys))
-        chosen = random.choices(keys, weights=weights, k=n_pick)
+        n_weighted = min(3, n_pick)
+        n_uniform = n_pick - n_weighted
+
+        # Weighted picks (favor sparse checkpoints)
+        weights = [ckpt_missing[k] for k in keys]
+        chosen = list(random.choices(keys, weights=weights, k=n_weighted))
         # Deduplicate
-        chosen = list(dict.fromkeys(chosen))  # preserve order, remove dups
-        while len(chosen) < n_pick:
-            extra = random.choices(keys, weights=weights, k=1)[0]
-            if extra not in chosen:
-                chosen.append(extra)
+        chosen = list(dict.fromkeys(chosen))
+
+        # Uniform picks from remaining (ensure everyone gets a chance)
+        remaining = [k for k in keys if k not in chosen]
+        for _ in range(n_uniform):
+            if not remaining: break
+            extra = random.choice(remaining)
+            chosen.append(extra)
+            remaining.remove(extra)
 
         if len(chosen) < 2:
             time.sleep(args.interval)
@@ -512,23 +520,6 @@ def main():
 
         # Build all pairs among chosen models
         pair_list = [(i, j) for i in range(len(loaded)) for j in range(len(loaded)) if i < j]
-
-        # Add cross-set pairs: each model also plays one random outsider
-        # to prevent disconnected clusters
-        for idx in range(len(loaded)):
-            outsiders = [k for k in keys if k not in chosen]
-            if not outsiders:
-                break
-            d_out, ckpt_out = random.choice(outsiders)
-            path_out = os.path.join(d_out, ckpt_out)
-            exp_out = os.path.basename(d_out.rstrip("/"))
-            cfg_out = get_model_cfg(d_out)
-            m_out = GomokuTransformer(cfg_out).to(device).eval()
-            m_out.load_state_dict(torch.load(path_out, map_location=device))
-            out_idx = len(loaded)
-            loaded.append((f"{exp_out}:{ckpt_out}", m_out))
-            pair_list.append((idx, out_idx))
-
         n_pairs = len(pair_list)
         total_games = n_pairs * gpp
 
