@@ -189,6 +189,12 @@ def cache_key(a_name, b_name):
     sb = int(b_name.split("_")[1].split(".")[0])
     return f"{min(sa,sb)}_{max(sa,sb)}"
 
+def match_ok(val, games_per_pair):
+    """Check cached result has matching game count (backward compat)."""
+    if isinstance(val, list) and len(val) >= 4:
+        return val[3] == games_per_pair
+    return False  # old format without game count → recompute
+
 def cross_key(exp_a, a_name, exp_b, b_name):
     sa = int(a_name.split("_")[1].split(".")[0])
     sb = int(b_name.split("_")[1].split(".")[0])
@@ -216,7 +222,7 @@ def plot_all(watch_dirs, games_per_pair):
             for key, val in cache.items():
                 if key == "_meta": continue
                 try:
-                    wa, wb, d = val
+                    wa, wb, d = val[0], val[1], val[2]  # first 3 elements, ignore game count
                     s1, s2 = key.split("_")
                     a = f"{exp}:step_{int(s1):06d}"
                     b = f"{exp}:step_{int(s2):06d}"
@@ -230,7 +236,7 @@ def plot_all(watch_dirs, games_per_pair):
             for key, val in cc.items():
                 if key == "_meta": continue
                 try:
-                    wa, wb, d = val
+                    wa, wb, d = val[0], val[1], val[2]
                     a_raw, b_raw = key.split("|")
                     ea, sa = a_raw.split(":")
                     eb, sb = b_raw.split(":")
@@ -281,13 +287,13 @@ def all_ckpts(watch_dir):
     return sorted([f for f in os.listdir(watch_dir) if f.endswith(".pt")],
                   key=lambda x: int(x.split("_")[1].split(".")[0]))
 
-def missing_pairs(watch_dir, cache):
+def missing_pairs(watch_dir, cache, games_per_pair):
     ckpts = all_ckpts(watch_dir)
     missing = []
     for i, a in enumerate(ckpts):
         for b in ckpts[i+1:]:
             key = cache_key(a, b)
-            if key not in cache:
+            if key not in cache or not match_ok(cache.get(key, []), games_per_pair):
                 missing.append((a, b))
     return missing
 
@@ -411,7 +417,7 @@ def main():
         intra_missing = []
         for d in args.watch_dir:
             cache = load_cache(cache_path(d))
-            for a, b in missing_pairs(d, cache):
+            for a, b in missing_pairs(d, cache, games_per_pair):
                 intra_missing.append(("intra", d, d, a, b))
 
         # Collect cross-experiment missing pairs (sample up to 100)
@@ -428,7 +434,7 @@ def main():
                 a = random.choice(ckpts_a)
                 b = random.choice(ckpts_b)
                 key = cross_key(da, a, db, b)
-                if key not in cross_cache:
+                if key not in cross_cache or not match_ok(cross_cache.get(key, []), games_per_pair):
                     cross_missing.append(("cross", da, db, a, b))
 
         # Pick one pair: 70% intra, 30% cross (if both available)
@@ -468,7 +474,7 @@ def main():
               end=" ", flush=True)
 
         wa, wb, dg = play_match(model_a, model_b, games_per_pair, args.batch, device)
-        cache[key] = (wa, wb, dg)
+        cache[key] = (wa, wb, dg, games_per_pair)
         if kind == "intra":
             save_cache(cache_path(da), cache)
         else:

@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GAMES="${GAMES:-512}"
+GAMES="${GAMES:-128}"
 BATCH="${BATCH:-256}"
 INTERVAL="${INTERVAL:-10}"
 DEVICE="${DEVICE:-cuda}"
