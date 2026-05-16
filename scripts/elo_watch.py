@@ -12,8 +12,9 @@ import torch, numpy as np, gomoku_cpp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from model import ModelConfig, GomokuTransformer
 
-BOARD_SIZE = 15; N_CELLS = 225
+BOARD_SIZE = 15; N_CELLS = 225; PAGE = 32
 CACHE_DIR = "elo_caches"
+MAX_MOVES = 150
 PLOT_FILE = "output/elo_curve.png"
 MAX_MOVES = 180  # hard cap
 
@@ -272,7 +273,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--watch_dir", type=str, action="append", default=[])
     parser.add_argument("--games_per_pair", type=int, default=128)
-    parser.add_argument("--batch", type=int, default=256)
+    parser.add_argument("--n_models", type=int, default=5,
+                        help="Number of models to load per round (multi-model batching)")
     parser.add_argument("--interval", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
@@ -298,7 +300,7 @@ def main():
         cache["_meta"]["games_per_pair"] = gpp
         save_cache(cp, cache)
 
-    print(f"Watching {len(args.watch_dir)} dirs, {gpp} games/pair, batch={args.batch}")
+    print(f"Watching {len(args.watch_dir)} dirs, {gpp} games/pair, n_models={args.n_models}")
     for d in args.watch_dir: print(f"  {d}")
     print(f"Model: d_model={model_cfg_raw['d_model']}, n_layers={model_cfg_raw['n_layers']}\n")
 
@@ -351,85 +353,212 @@ def main():
         print(f"  {'TOTAL':<20s} {'-':>6s} {om:8d} {ot:8d} {f'{100*om/ot:.0f}%' if ot>0 else '-':>7s}")
         print(f"  {'─'*55}\n")
 
+    # ── Multi-model batched play ────────────────────────────────
+
+    @torch.inference_mode()
+    def play_multi_batch(loaded_models, pair_list, games_per_dir, device):
+        """Play all given pairs in one batch. loaded_models: list of (name, model).
+        pair_list: [(a_idx, b_idx)] — each pair gets games_per_dir games (half a=black).
+        Returns: {(a_name, b_name): (wa, wb, dg)}.
+        """
+        total_games = 0
+        game_info = []
+        black_m_idx = []; white_m_idx = []
+        for a_idx, b_idx in pair_list:
+            for g in range(games_per_dir):
+                is_a_black = (g % 2 == 0)
+                black_m_idx.append(a_idx if is_a_black else b_idx)
+                white_m_idx.append(b_idx if is_a_black else a_idx)
+                game_info.append((a_idx, b_idx, g))
+                total_games += 1
+        b = total_games
+        if b == 0: return {}
+
+        M = len(loaded_models)
+        caches = [loaded_models[0][1].create_cache(max_games=b, max_cache_len=MAX_MOVES) for _ in range(M)]
+        black_m = torch.tensor(black_m_idx, device=device)
+        white_m = torch.tensor(white_m_idx, device=device)
+        occupied = torch.zeros(b, N_CELLS, dtype=torch.bool, device=device)
+        pool = gomoku_cpp.GamePool(b)
+        all_done = torch.zeros(b, dtype=torch.bool, device=device)
+        winners  = torch.zeros(b, dtype=torch.long, device=device)
+        accum_acts = torch.zeros(b, PAGE, dtype=torch.long, device=device)
+        accum_cnt = 0
+        idx_b = torch.arange(b, device=device)
+
+        def flush():
+            nonlocal accum_cnt
+            if accum_cnt == 0: return
+            acts_cpu = accum_acts[:, :accum_cnt].cpu().numpy().astype(np.int32)
+            for pg_start in range(0, accum_cnt, PAGE):
+                pg_end = min(pg_start + PAGE, accum_cnt)
+                pg_acts = np.zeros((b, PAGE), dtype=np.int32)
+                pg_acts[:, :pg_end - pg_start] = acts_cpu[:, pg_start:pg_end]
+                results = pool.execute_block(np.arange(b, dtype=np.int32), pg_acts)
+                for i in range(b):
+                    if all_done[i]: continue
+                    es = int(results[i, 0])
+                    if es >= 0:
+                        all_done[i] = True
+                        winners[i] = int(results[i, 1])
+            accum_cnt = 0
+
+        # First move
+        fm_all = torch.stack([m[1].first_move_logits for m in loaded_models])
+        fm_buf = fm_all[black_m]
+        fm_buf = fm_buf.masked_fill(occupied, -1e9)
+        probs = torch.softmax(fm_buf.float(), dim=-1)
+        first = torch.multinomial(probs, 1).squeeze(-1)
+        occupied[idx_b, first] = True
+        accum_acts[:, 0] = first; accum_cnt = 1
+        last_act = first
+        last_plr = torch.zeros(b, dtype=torch.long, device=device)
+
+        for step in range(1, MAX_MOVES):
+            cp = step % 2
+            all_logits = torch.zeros(M, b, N_CELLS, device=device)
+            for mi in range(M):
+                all_logits[mi] = loaded_models[mi][1].decode(
+                    last_act, last_plr, caches[mi], idx_b)
+
+            model_for_game = black_m if cp == 0 else white_m
+            logits = all_logits[model_for_game, idx_b]
+            logits = logits.masked_fill(occupied, -1e9)
+            probs = torch.softmax(logits, dim=-1)
+            actions = torch.multinomial(probs, 1).squeeze(-1)
+            occupied.scatter_(1, actions.unsqueeze(1), True)
+            last_act = actions
+            last_plr = torch.full((b,), cp, dtype=torch.long, device=device)
+
+            accum_acts[:, accum_cnt] = actions
+            accum_cnt += 1
+            if accum_cnt == PAGE:
+                flush()
+                if all_done.all(): break
+        flush()
+        winners[(winners == 0) & ~all_done] = 3
+
+        # Aggregate per pair
+        results = {}
+        for pi, (a_idx, b_idx) in enumerate(pair_list):
+            wa = wb = dg = 0
+            for g in range(games_per_dir):
+                gi = pi * games_per_dir + g
+                w = winners[gi].item()
+                is_a_black = (g % 2 == 0)
+                if w == 1:
+                    wa += 1 if is_a_black else 0; wb += 0 if is_a_black else 1
+                elif w == 2:
+                    wa += 0 if is_a_black else 1; wb += 1 if is_a_black else 0
+                else: dg += 1
+            a_name = loaded_models[a_idx][0]
+            b_name = loaded_models[b_idx][0]
+            results[(a_name, b_name)] = (wa, wb, dg)
+        return results
+
+    # ── Main sampling loop ─────────────────────────────────────
+
+    # How many models to load per round
+    ACTIVE_MODELS = min(args.n_models, 8)
+
+    round_num = 0
     while True:
-        # Build per-checkpoint missing pairs for uniform coverage
-        # intra_ckpt: {d: {ckpt: [(opp_ckpt, a, b), ...]}}
-        intra_ckpt = {}
+        # Collect all (dir, ckpt) that have unplayed pairs
+        ckpt_missing = {}  # (dir, ckpt) → count of missing pairs
         for d in args.watch_dir:
             cache = load_cache(cache_path(d))
-            d_ckpts = {}
+            ckpt_count = {}
             for a, b in missing_pairs(d, cache, gpp):
-                d_ckpts.setdefault(a, []).append(("intra", d, d, a, b))
-                d_ckpts.setdefault(b, []).append(("intra", d, d, a, b))
-            if d_ckpts:
-                intra_ckpt[d] = d_ckpts
+                ckpt_count[a] = ckpt_count.get(a, 0) + 1
+                ckpt_count[b] = ckpt_count.get(b, 0) + 1
+            for ckpt, cnt in ckpt_count.items():
+                ckpt_missing[(d, ckpt)] = cnt
 
-        # Collect all (dir, ckpt) keys for uniform sampling
-        all_ckpt_keys = []
-        for d, d_ckpts in intra_ckpt.items():
-            for ckpt in d_ckpts:
-                all_ckpt_keys.append((d, ckpt))
-
-        # Pick: 70% intra, 30% cross
-        pick_cross = False
-        cross_cache = load_cache(CROSS_CACHE)
-        if len(args.watch_dir) >= 2 and random.random() < 0.3:
-            pick_cross = True
-
-        if (not pick_cross or not all_ckpt_keys) and all_ckpt_keys:
-            # Intra: pick random checkpoint, then random opponent
-            d, ckpt = random.choice(all_ckpt_keys)
-            choice = random.choice(intra_ckpt[d][ckpt])
-        elif pick_cross:
-            # Cross: pick two random experiments, then one ckpt from each
-            dirs_with = [d_ for d_ in args.watch_dir if all_ckpts(d_)]
-            if len(dirs_with) >= 2:
-                da, db = random.sample(dirs_with, 2)
-                ca, cb = all_ckpts(da), all_ckpts(db)
-                if ca and cb:
-                    a, b = random.choice(ca), random.choice(cb)
-                    key = cross_key(da, a, db, b)
-                    if key in cross_cache and match_ok(cross_cache.get(key, []), gpp):
-                        choice = None  # already done, fall through
-                    else:
-                        choice = ("cross", da, db, a, b)
-                else:
-                    choice = None
-            else:
-                choice = None
-        else:
-            choice = None
-
-        if choice is None:
+        if len(ckpt_missing) < 2:
             print_stats()
             time.sleep(args.interval)
             try: plot_all(args.watch_dir, gpp)
             except Exception as e: print(f"  Plot error: {e}")
             continue
 
-        kind, da, db, a_name, b_name = choice
-        if kind == "intra":
-            cache = load_cache(cache_path(da))
-            key = cache_key(a_name, b_name)
-            tag = os.path.basename(da.rstrip("/"))
-        else:
-            cache = cross_cache
-            key = cross_key(da, a_name, db, b_name)
-            tag = f"{os.path.basename(da.rstrip('/'))} vs {os.path.basename(db.rstrip('/'))}"
-        if key in cache and match_ok(cache.get(key, []), gpp): continue
+        # Pick ACTIVE_MODELS checkpoints, weighted by missing count
+        keys = list(ckpt_missing.keys())
+        weights = [ckpt_missing[k] for k in keys]
+        n_pick = min(ACTIVE_MODELS, len(keys))
+        chosen = random.choices(keys, weights=weights, k=n_pick)
+        # Deduplicate
+        chosen = list(dict.fromkeys(chosen))  # preserve order, remove dups
+        while len(chosen) < n_pick:
+            extra = random.choices(keys, weights=weights, k=1)[0]
+            if extra not in chosen:
+                chosen.append(extra)
 
-        model_a = get_model(da, a_name)
-        model_b = get_model(db, b_name)
+        if len(chosen) < 2:
+            time.sleep(args.interval)
+            continue
+
+        # Load models
+        round_num += 1
+        t_load = time.perf_counter()
+        loaded = []
+        for d, ckpt in chosen:
+            path = os.path.join(d, ckpt)
+            exp = os.path.basename(d.rstrip("/"))
+            cfg = get_model_cfg(d)
+            m = GomokuTransformer(cfg).to(device).eval()
+            m.load_state_dict(torch.load(path, map_location=device))
+            loaded.append((f"{exp}:{ckpt}", m))
+        load_time = time.perf_counter() - t_load
+
+        # Build all pairs among chosen models
+        pair_list = [(i, j) for i in range(len(loaded)) for j in range(len(loaded)) if i < j]
+        n_pairs = len(pair_list)
+        total_games = n_pairs * gpp
+
+        exp_names = list(set(os.path.basename(d.rstrip("/")) for d, _ in chosen))
+        tag = f"Round {round_num}: {len(chosen)} models"
+        if len(exp_names) <= 3:
+            tag += f" [{','.join(exp_names)}]"
+        print(f"\n[{time.strftime('%H:%M:%S')}] {tag} — {n_pairs} pairs × {gpp} games "
+              f"(load {load_time:.1f}s) ...", end=" ", flush=True)
+
         t0 = time.perf_counter()
-        print(f"[{time.strftime('%H:%M:%S')}] {tag}: {a_name} vs {b_name} ...",
-              end=" ", flush=True)
-
-        wa, wb, dg = play_match(model_a, model_b, gpp, args.batch, device)
-        cache[key] = (wa, wb, dg, gpp)
-        save_cache(cache_path(da) if kind == "intra" else CROSS_CACHE, cache)
-        wr = wa/(wa+wb) if wa+wb>0 else 0.5
+        results = play_multi_batch(loaded, pair_list, gpp, device)
         dt = time.perf_counter() - t0
-        print(f"{wa}-{wb} (D={dg}) WR={wr:.2%}  [{dt:.1f}s]")
+
+        # Save results
+        n_new = 0
+        for pi, (i, j) in enumerate(pair_list):
+            a_name, b_name = loaded[i][0], loaded[j][0]
+            wa, wb, dg = results[(a_name, b_name)]
+            # Determine which cache to write to
+            a_exp, a_ckpt = a_name.split(":", 1)
+            b_exp, b_ckpt = b_name.split(":", 1)
+            if a_exp == b_exp:
+                # Intra-experiment
+                d = next(d_ for d_ in args.watch_dir if os.path.basename(d_.rstrip("/")) == a_exp)
+                cache = load_cache(cache_path(d))
+                key = cache_key(a_ckpt, b_ckpt)
+                if key not in cache or not match_ok(cache.get(key, []), gpp):
+                    cache[key] = (wa, wb, dg, gpp)
+                    save_cache(cache_path(d), cache)
+                    n_new += 1
+            else:
+                # Cross-experiment
+                cross_cache = load_cache(CROSS_CACHE)
+                key = cross_key(a_exp, a_ckpt, b_exp, b_ckpt)
+                if key not in cross_cache or not match_ok(cross_cache.get(key, []), gpp):
+                    cross_cache[key] = (wa, wb, dg, gpp)
+                    save_cache(CROSS_CACHE, cross_cache)
+                    n_new += 1
+
+        total_wr = sum(wa/(wa+wb) if wa+wb>0 else 0.5 for wa,wb,_ in results.values()) / n_pairs
+        print(f"{total_games} games in {dt:.1f}s ({total_games/dt:.0f} games/s), "
+              f"{n_new} new pairs saved")
+
+        # Free GPU memory
+        del loaded
+        torch.cuda.empty_cache()
 
         print_stats()
         try: plot_all(args.watch_dir, gpp)
