@@ -1,0 +1,32 @@
+# Ablation: reward decay long run (10000 steps, checkpoint every 50)
+# Same hyperparams as abl_reward_decay but extended training
+
+model:
+  d_model: 128
+  n_layers: 16
+  n_heads: 4
+  d_ff: 256
+  dropout: 0.1
+  max_seq_len: 512
+
+training:
+  lr: 1.0e-3
+  lr_min: 1.0e-5
+  weight_decay: 0.01
+  entropy_coef: 0.01
+  entropy_coef_min: 0.001
+  entropy_fixed: null
+  reward_decay_half_life: 10
+  grad_clip: 1.0
+  games_per_step: 32768
+  page_size: 32
+  base_batch: 2048
+  base_seq_len: 128
+  train_batch_size: 512
+  augment: false
+  checkpoint_interval: 50
+
+wandb:
+  project: "gomoku-transformer"
+  entity: null
+  name: "reward_decay_long"
