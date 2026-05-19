@@ -11,6 +11,7 @@ class ModelConfig:
     dropout: float = 0.1
     max_seq_len: int = 512
     board_size: int = 15
+    value_head_dim: int = 64
 
     @property
     def n_positions(self) -> int:

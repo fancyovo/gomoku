@@ -7,6 +7,7 @@ ext_modules = [
         [
             "src/cpp/board.cpp",
             "src/cpp/game.cpp",
+            "src/cpp/mcts.cpp",
             "src/cpp/bindings.cpp",
         ],
         include_dirs=["src/cpp"],

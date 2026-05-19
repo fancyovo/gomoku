@@ -53,3 +53,40 @@ def reinforce_loss(
 
     loss = policy_loss * loss_scale + entropy_loss
     return loss, policy_loss.detach(), entropy.detach()
+
+
+def alphago_zero_loss(
+    policy_logits: torch.Tensor,
+    mcts_targets: torch.Tensor,
+    value_preds: torch.Tensor,
+    value_targets: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    value_weight: float = 1.0,
+):
+    """AlphaGo Zero loss: cross-entropy on policy + MSE on value.
+
+    Args:
+        policy_logits:  (N, n_positions) — model policy head outputs (logits)
+        mcts_targets:   (N, n_positions) — MCTS visit count distribution (target)
+        value_preds:    (N,) — model value head outputs (tanh, -1..1)
+        value_targets:  (N,) — game outcome from current player's perspective (+1/-1/0)
+        mask:           (N,) — True for valid positions
+        value_weight:   float — weight for value loss relative to policy loss
+    """
+    if mask is not None:
+        policy_logits = policy_logits[mask]
+        mcts_targets = mcts_targets[mask]
+        value_preds = value_preds[mask]
+        value_targets = value_targets[mask]
+
+    if len(value_targets) == 0:
+        return (torch.tensor(0.0, device=policy_logits.device),
+                torch.tensor(0.0, device=policy_logits.device),
+                torch.tensor(0.0, device=policy_logits.device))
+
+    log_probs = F.log_softmax(policy_logits, dim=-1)
+    policy_loss = -(mcts_targets * log_probs).sum(dim=-1).mean()
+    value_loss = F.mse_loss(value_preds, value_targets)
+
+    loss = policy_loss + value_weight * value_loss
+    return loss, policy_loss.detach(), value_loss.detach()
