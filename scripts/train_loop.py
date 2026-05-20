@@ -118,7 +118,6 @@ def run_selfplay(model):
             if r_val == 3: val_t[i] = 0.0
             elif r_val == 1: val_t[i] = 1.0 if plr == 0 else -1.0
             else: val_t[i] = 1.0 if plr == 1 else -1.0
-        if len(pols) < L: pols.append(np.ones(225, dtype=np.float32) / 225)
         trajectories.append({"positions": np.array(pos_hist[g], dtype=np.int64),
                              "players": np.array(plr_hist[g], dtype=np.int64),
                              "actions": np.array(pos_hist[g], dtype=np.int64),
@@ -164,7 +163,7 @@ def train_with_early_stop(model, trajectories):
         for i, s in enumerate(batch):
             L_ = s["actual_len"]
             pos[i, :L_] = s["positions"]; plr[i, :L_] = s["players"]
-            pol[i, :L_] = s["mcts_policies"]; val_t[i, :L_] = s["value_targets"]; mask[i, :L_] = True
+            pol[i, :L_-1] = s["mcts_policies"]; val_t[i, :L_] = s["value_targets"]; mask[i, :L_] = True
             syms[i] = s.get("sym", 0)
         return {"positions": pos, "players": plr, "mcts_policies": pol, "value_targets": val_t, "mask": mask, "sym": syms}
 
@@ -181,16 +180,9 @@ def train_with_early_stop(model, trajectories):
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     p, v = model(pos, plr)
                 if L_ > 1:
-                    pp = p[:, 1:, :].float(); vv = v[:, 1:].float()
-                    tp = pol_t[:, 1:, :]; tv = val_t[:, 1:]; pm = m[:, 1:]
+                    pp = p[:, :-1, :].float(); vv = v[:, :-1].float()
+                    tp = pol_t[:, :-1, :]; tv = val_t[:, :-1]; pm = m[:, :-1]
                     loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225), tp.reshape(-1, 225), vv.reshape(-1), tv.reshape(-1), pm.reshape(-1))
-                    # First move loss: only on identity symmetry (sym=0) to avoid conflicting targets
-                    sym0 = batch.get("sym", torch.zeros(B_, dtype=torch.long)) == 0
-                    if sym0.any():
-                        fm = model.first_move_logits.unsqueeze(0).expand(sym0.sum().item(), -1)
-                        fl, _, _ = alphago_zero_loss(fm.float(), pol_t[sym0, 0, :],
-                            v[sym0, 0].float(), val_t[sym0, 0], m[sym0, 0])
-                        loss = loss + fl
                     total += loss.item(); n_batch += 1
         return total / max(n_batch, 1)
 
@@ -206,15 +198,9 @@ def train_with_early_stop(model, trajectories):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 p, v = model(pos, plr)
             if L_ > 1:
-                pp = p[:, 1:, :].contiguous(); vv = v[:, 1:].contiguous()
-                tp = pol_t[:, 1:, :].contiguous(); tv = val_t[:, 1:].contiguous(); pm = m[:, 1:].contiguous()
+                pp = p[:, :-1, :].contiguous(); vv = v[:, :-1].contiguous()
+                tp = pol_t[:, :-1, :].contiguous(); tv = val_t[:, :-1].contiguous(); pm = m[:, :-1].contiguous()
                 loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225).float(), tp.reshape(-1, 225), vv.reshape(-1).float(), tv.reshape(-1), pm.reshape(-1))
-                sym0 = batch.get("sym", torch.zeros(B_, dtype=torch.long)) == 0
-                if sym0.any():
-                    fm = model.first_move_logits.unsqueeze(0).expand(sym0.sum().item(), -1)
-                    fl, _, _ = alphago_zero_loss(fm.float(), pol_t[sym0, 0, :],
-                        v[sym0, 0].float(), val_t[sym0, 0], m[sym0, 0])
-                    loss = loss + fl
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step(); opt.zero_grad()
