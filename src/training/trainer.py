@@ -109,7 +109,7 @@ class Trainer:
             B, L = pos.shape
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = self.model(pos, plr)
+                logits, _ = self.model(pos, plr)
 
             if L > 1:
                 pred_logits = logits[:, :-1, :].contiguous()
@@ -210,7 +210,8 @@ class Trainer:
         B, L = pos.shape
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits = self.model(pos, plr).float()
+            logits, _ = self.model(pos, plr)
+            logits = logits.float()
 
         probs = torch.softmax(logits, dim=-1)
         log_probs = torch.log_softmax(logits, dim=-1)

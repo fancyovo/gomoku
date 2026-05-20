@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Training loop — self-play + training for N steps. Saves checkpoints and length curve."""
 
-import torch, sys, os, time, json, numpy as np, argparse
+import torch, sys, os, time, json, numpy as np, argparse, glob
 from collections import Counter
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -11,6 +11,12 @@ from training.augment import SYM_TABLE, N_SYMS
 from training.loss import alphago_zero_loss
 import gomoku_cpp
 
+# Inverse symmetry lookup: policy transform needs new_pos → old_pos (inverse of SYM_TABLE)
+# SYM_TABLE[s][old] = new. We need inv_map[new] = old.
+# Inverse of D4 group: [id, rot270, rot180, rot90, flipH, flipV, transp, antidiag]
+_INV_SYM = [0, 3, 2, 1, 4, 5, 6, 7]
+INV_SYM_TABLE = SYM_TABLE[_INV_SYM]  # (8, 225), inv_map[new] = old
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ─── Config ─────────────────────────────────────────────────────
@@ -18,9 +24,9 @@ G = 512          # self-play batch size
 M = 8            # leaves per round
 S = 64           # rounds → 512 total sims
 TRAIN_BATCH = 128
-MAX_EPOCHS = 50
-EARLY_STOP = 5
-N_STEPS = 300
+MAX_EPOCHS = 100000
+EARLY_STOP = 20
+N_STEPS = 500
 CHECKPOINT_DIR = "checkpoints/train_loop"
 OUTPUT_DIR = "output"
 
@@ -56,8 +62,9 @@ def run_selfplay(model):
         if len(active) == 0: break
 
         st = torch.from_numpy(active).to(DEVICE)
+        cp = int(pos_lens[active[0]]) % 2  # current player for this turn
         dp = torch.zeros(len(active), 1, dtype=torch.long, device=DEVICE)
-        dplr = torch.zeros(len(active), 1, dtype=torch.long, device=DEVICE)
+        dplr = torch.full((len(active), 1), cp, dtype=torch.long, device=DEVICE)
         dl = torch.ones(len(active), dtype=torch.long, device=DEVICE)
         lp, lv = model.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
         lp = lp.masked_fill(occ_gpu[active], -1e9); torch.cuda.synchronize()
@@ -119,7 +126,10 @@ def run_selfplay(model):
                              "value_targets": val_t, "actual_len": L, "result": r_val})
 
     del kv; torch.cuda.empty_cache()
-    return trajectories, results, pos_lens
+    black_wins = int((results == 1).sum())
+    white_wins = int((results == 2).sum())
+    draws = int((results == 3).sum()) + int((results == 0).sum())
+    return trajectories, results, pos_lens, black_wins, white_wins, draws
 
 
 # ─── Training ───────────────────────────────────────────────────
@@ -131,9 +141,11 @@ def train_with_early_stop(model, trajectories):
         pos = torch.from_numpy(traj["positions"][:L]); plr = torch.from_numpy(traj["players"][:L])
         pol = torch.from_numpy(traj["mcts_policies"][:L]); val = torch.from_numpy(traj["value_targets"][:L])
         for s in range(N_SYMS):
-            remap = SYM_TABLE[s]
+            remap = SYM_TABLE[s]  # old→new, for position tokens
+            inv_remap = INV_SYM_TABLE[s]  # new→old, for policy vectors
             samples.append({"positions": remap[pos], "players": plr,
-                            "mcts_policies": pol[:, remap], "value_targets": val, "actual_len": L})
+                            "mcts_policies": pol[:, inv_remap], "value_targets": val,
+                            "actual_len": L, "sym": s})
 
     n = len(samples); n_train = int(n * 0.8)
     idx = np.random.permutation(n)
@@ -148,12 +160,13 @@ def train_with_early_stop(model, trajectories):
         max_len = max(s["positions"].shape[0] for s in batch); B_ = len(batch)
         pos = torch.zeros(B_, max_len, dtype=torch.long); plr = torch.zeros(B_, max_len, dtype=torch.long)
         pol = torch.zeros(B_, max_len, 225); val_t = torch.zeros(B_, max_len)
-        mask = torch.zeros(B_, max_len, dtype=torch.bool)
+        mask = torch.zeros(B_, max_len, dtype=torch.bool); syms = torch.zeros(B_, dtype=torch.long)
         for i, s in enumerate(batch):
             L_ = s["actual_len"]
             pos[i, :L_] = s["positions"]; plr[i, :L_] = s["players"]
             pol[i, :L_] = s["mcts_policies"]; val_t[i, :L_] = s["value_targets"]; mask[i, :L_] = True
-        return {"positions": pos, "players": plr, "mcts_policies": pol, "value_targets": val_t, "mask": mask}
+            syms[i] = s.get("sym", 0)
+        return {"positions": pos, "players": plr, "mcts_policies": pol, "value_targets": val_t, "mask": mask, "sym": syms}
 
     train_ds, test_ds = DS(samples, train_idx), DS(samples, test_idx)
 
@@ -171,9 +184,14 @@ def train_with_early_stop(model, trajectories):
                     pp = p[:, :-1, :].float(); vv = v[:, :-1].float()
                     tp = pol_t[:, 1:, :]; tv = val_t[:, 1:]; pm = m[:, 1:]
                     loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225), tp.reshape(-1, 225), vv.reshape(-1), tv.reshape(-1), pm.reshape(-1))
-                    fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
-                    fl, _, _ = alphago_zero_loss(fm.float(), pol_t[:, 0, :], v[:, 0].float(), val_t[:, 0], m[:, 0])
-                    loss = loss + fl; total += loss.item(); n_batch += 1
+                    # First move loss: only on identity symmetry (sym=0) to avoid conflicting targets
+                    sym0 = batch.get("sym", torch.zeros(B_, dtype=torch.long)) == 0
+                    if sym0.any():
+                        fm = model.first_move_logits.unsqueeze(0).expand(sym0.sum().item(), -1)
+                        fl, _, _ = alphago_zero_loss(fm.float(), pol_t[sym0, 0, :],
+                            v[sym0, 0].float(), val_t[sym0, 0], m[sym0, 0])
+                        loss = loss + fl
+                    total += loss.item(); n_batch += 1
         return total / max(n_batch, 1)
 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
@@ -191,9 +209,13 @@ def train_with_early_stop(model, trajectories):
                 pp = p[:, :-1, :].contiguous(); vv = v[:, :-1].contiguous()
                 tp = pol_t[:, 1:, :].contiguous(); tv = val_t[:, 1:].contiguous(); pm = m[:, 1:].contiguous()
                 loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225).float(), tp.reshape(-1, 225), vv.reshape(-1).float(), tv.reshape(-1), pm.reshape(-1))
-                fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
-                fl, _, _ = alphago_zero_loss(fm.float(), pol_t[:, 0, :], v[:, 0].float(), val_t[:, 0], m[:, 0])
-                loss = loss + fl; loss.backward()
+                sym0 = batch.get("sym", torch.zeros(B_, dtype=torch.long)) == 0
+                if sym0.any():
+                    fm = model.first_move_logits.unsqueeze(0).expand(sym0.sum().item(), -1)
+                    fl, _, _ = alphago_zero_loss(fm.float(), pol_t[sym0, 0, :],
+                        v[sym0, 0].float(), val_t[sym0, 0], m[sym0, 0])
+                    loss = loss + fl
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step(); opt.zero_grad()
 
@@ -213,35 +235,53 @@ def train_with_early_stop(model, trajectories):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--steps", type=int, default=N_STEPS)
     args = parser.parse_args()
     global DEVICE; DEVICE = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    total_steps = args.steps
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True); os.makedirs(OUTPUT_DIR, exist_ok=True)
     cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15)
-    model = GomokuTransformer(cfg).to(DEVICE).eval()
+
+    # Auto-resume from latest checkpoint
+    existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "step_*.pt")))
+    start_step = 0
+    history = {"avg_len": [], "sp_time": [], "tr_time": [], "epochs": [], "test_loss": [], "black_wr": []}
+    length_file = os.path.join(OUTPUT_DIR, "train_length.json")
+
+    if existing:
+        latest = existing[-1]
+        start_step = int(os.path.basename(latest).split("_")[1].split(".")[0]) + 1
+        model = GomokuTransformer(cfg).to(DEVICE).eval()
+        model.load_state_dict(torch.load(latest, map_location=DEVICE))
+        if os.path.exists(length_file):
+            with open(length_file) as f: history = json.load(f)
+        print(f"Resumed from {os.path.basename(latest)} (start_step={start_step})")
+    else:
+        model = GomokuTransformer(cfg).to(DEVICE).eval()
+        print(f"Starting from scratch")
+
     print(f"Model: {sum(p.numel() for p in model.parameters()):,} params")
     print(f"Config: G={G} M={M} S={S} total_sims={M*S}")
     print(f"Training: batch={TRAIN_BATCH} early_stop={EARLY_STOP} max_epochs={MAX_EPOCHS}")
-    print(f"Steps: {N_STEPS}")
+    print(f"Steps: {start_step} -> {start_step + total_steps - 1} ({total_steps} steps)")
     print(f"Checkpoints: {CHECKPOINT_DIR}/")
     print()
 
-    history = {"avg_len": [], "sp_time": [], "tr_time": [], "epochs": [], "test_loss": []}
-    length_file = os.path.join(OUTPUT_DIR, "train_length.json")
-
-    for step in range(N_STEPS):
+    for step in range(start_step, start_step + total_steps):
         t0_step = time.perf_counter()
 
         # Self-play
         t0 = time.perf_counter()
         model.eval()
-        traj, results, pos_lens = run_selfplay(model)
+        traj, results, pos_lens, bw, ww, dr = run_selfplay(model)
         torch.cuda.synchronize()
         t_sp = time.perf_counter() - t0
 
         avg_len = pos_lens.mean()
         rc = Counter(results)
         history["avg_len"].append(float(avg_len)); history["sp_time"].append(t_sp)
+        history.setdefault("black_wr", []).append(bw / (bw + ww) if (bw + ww) > 0 else 0.5)
 
         # Training
         t0 = time.perf_counter()
@@ -251,9 +291,9 @@ def main():
         history["tr_time"].append(t_tr); history["epochs"].append(best_ep); history["test_loss"].append(float(best_loss))
 
         step_time = time.perf_counter() - t0_step
-        print(f"[step {step+1:4d}/{N_STEPS}] len={avg_len:.0f} sp={t_sp:.0f}s tr={t_tr:.0f}s "
+        print(f"[step {step:4d}] len={avg_len:.0f} sp={t_sp:.0f}s tr={t_tr:.0f}s "
               f"epoch={best_ep} loss={best_loss:.4f} B={rc.get(1,0)} W={rc.get(2,0)} D={rc.get(3,0)} "
-              f"total={step_time:.0f}s")
+              f"BWR={bw/(bw+ww)*100:.0f}% total={step_time:.0f}s")
 
         # Save checkpoint (atomic: write to tmp then rename)
         ckpt_path = os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt")
@@ -265,14 +305,18 @@ def main():
         with open(length_file, "w") as f: json.dump(history, f)
 
         if (step + 1) % 5 == 0 or step == 0:
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.plot(history["avg_len"], "o-", color="C0", markersize=4)
-            ax.set_xlabel("Step"); ax.set_ylabel("Avg Game Length"); ax.set_title("Game Length vs Training")
-            ax.grid(True, alpha=0.3)
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+            ax1.plot(history["avg_len"], "o-", color="C0", markersize=4)
+            ax1.set_xlabel("Step"); ax1.set_ylabel("Avg Game Length")
+            ax1.set_title("Game Length vs Training"); ax1.grid(True, alpha=0.3)
+            ax2.plot(history["black_wr"], "o-", color="C3", markersize=4)
+            ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=0.4)
+            ax2.set_xlabel("Step"); ax2.set_ylabel("Black Win Rate")
+            ax2.set_title("Self-Play Black Win Rate"); ax2.grid(True, alpha=0.3)
             plt.tight_layout(); plt.savefig(os.path.join(OUTPUT_DIR, "train_length.png"), dpi=100); plt.close()
 
     print(f"\nTraining complete. Checkpoints: {CHECKPOINT_DIR}/")
-    print(f"Length curve: {OUTPUT_DIR}/train_length.png")
+    print(f"Curves: {OUTPUT_DIR}/train_length.png")
 
 
 if __name__ == "__main__":

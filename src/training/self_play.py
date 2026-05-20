@@ -73,7 +73,7 @@ class SelfPlayRunner:
                     first_act = self.model.sample_first_moves(b, self.device)
                     pos_t = first_act.unsqueeze(1)
                     plr_t = torch.zeros(b, 1, dtype=torch.long, device=self.device)
-                    logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
+                    logits, _ = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
 
                     occupied = torch.zeros(b, self.n_positions, dtype=torch.bool,
                                           device=self.device)
@@ -105,7 +105,7 @@ class SelfPlayRunner:
                     occupied[idx_t.unsqueeze(1).expand(b, L).reshape(-1),
                              pos_t.reshape(-1)] = True
 
-                    logits = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
+                    logits, _ = self.model.prefill(pos_t, plr_t, kv_cache, local_idx)
                     logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
                     first_block_act = torch.multinomial(probs, 1).squeeze(-1)
@@ -123,7 +123,7 @@ class SelfPlayRunner:
                     current_plr = torch.full((b,), current_step % 2,
                                              dtype=torch.long, device=self.device)
 
-                    logits = self.model.decode(
+                    logits, _ = self.model.decode(
                         current_pos, current_plr, kv_cache, idx_t
                     )
                     logits = logits.masked_fill(occupied, float('-inf'))
