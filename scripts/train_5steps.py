@@ -92,6 +92,11 @@ def run_selfplay(model):
             elif rv==1: val_t[i]=1.0 if plr==0 else -1.0
             else: val_t[i]=1.0 if plr==1 else -1.0
 
+        # First move has no MCTS policy (sampled from first_move_logits).
+        # Pad with uniform so mcts_policies has L entries aligned with positions.
+        if len(pols) < L:
+            pols.insert(0, np.ones(225, dtype=np.float32) / 225)
+
         trajs.append({"positions":np.array(pos_hist[g],dtype=np.int64),"players":np.array(plr_hist[g],dtype=np.int64),
                        "actions":np.array(pos_hist[g],dtype=np.int64),"mcts_policies":np.array(pols,dtype=np.float32),
                        "value_targets":val_t,"actual_len":L,"result":rv})

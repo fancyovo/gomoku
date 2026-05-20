@@ -95,7 +95,7 @@ def run_selfplay(model):
             if rv==3: val_t[i]=0.0
             elif rv==1: val_t[i]=1.0 if plr==0 else -1.0
             else: val_t[i]=1.0 if plr==1 else -1.0
-        if len(pols)<L: pols.append(np.ones(225,dtype=np.float32)/225)
+        if len(pols)<L: pols.insert(0, np.ones(225,dtype=np.float32)/225)
         trajs.append({"positions":np.array(pos_hist[g],dtype=np.int64),"players":np.array(plr_hist[g],dtype=np.int64),
                        "actions":np.array(pos_hist[g],dtype=np.int64),"mcts_policies":np.array(pols,dtype=np.float32),
                        "value_targets":val_t,"actual_len":L,"result":rv})
