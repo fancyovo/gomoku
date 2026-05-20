@@ -42,7 +42,8 @@ def run_selfplay(model):
         active=np.where(~finished)[0]
         if len(active)==0: break
         st=torch.from_numpy(active).to(DEVICE)
-        dp=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE); dplr=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE)
+        cp=int(pos_lens[active[0]])%2 if len(active)>0 else 0
+        dp=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE); dplr=torch.full((len(active),1),cp,dtype=torch.long,device=DEVICE)
         dl=torch.ones(len(active),dtype=torch.long,device=DEVICE)
         lp,lv=model.evaluate_mcts_leaves(dp,dplr,kv,st,dl)
         lp=lp.masked_fill(occ_gpu[active],-1e9); torch.cuda.synchronize()
@@ -90,7 +91,7 @@ def run_selfplay(model):
             if rv==3: val_t[i]=0.0
             elif rv==1: val_t[i]=1.0 if plr==0 else -1.0
             else: val_t[i]=1.0 if plr==1 else -1.0
-        if len(pols)<L: pols.append(np.ones(225,dtype=np.float32)/225)
+
         trajs.append({"positions":np.array(pos_hist[g],dtype=np.int64),"players":np.array(plr_hist[g],dtype=np.int64),
                        "actions":np.array(pos_hist[g],dtype=np.int64),"mcts_policies":np.array(pols,dtype=np.float32),
                        "value_targets":val_t,"actual_len":L,"result":rv})
@@ -223,7 +224,8 @@ def play_match(model_a,model_b):
         cp=move%2
         for mgr,mdl,kv in [(mgr_a,model_a,kva),(mgr_b,model_b,kvb)]:
             st=torch.from_numpy(active).to(DEVICE)
-            dp=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE); dplr=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE)
+            cp=move%2
+            dp=torch.zeros(len(active),1,dtype=torch.long,device=DEVICE); dplr=torch.full((len(active),1),cp,dtype=torch.long,device=DEVICE)
             dl=torch.ones(len(active),dtype=torch.long,device=DEVICE)
             lp,lv=mdl.evaluate_mcts_leaves(dp,dplr,kv,st,dl)
             lp=lp.masked_fill(occ_gpu[active],-1e9); torch.cuda.synchronize()

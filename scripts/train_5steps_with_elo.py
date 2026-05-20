@@ -108,7 +108,7 @@ def run_selfplay(model):
             if r_val == 3: val_t[i] = 0.0
             elif r_val == 1: val_t[i] = 1.0 if plr == 0 else -1.0
             else: val_t[i] = 1.0 if plr == 1 else -1.0
-        if len(pols) < L: pols.append(np.ones(225, dtype=np.float32) / 225)
+
         trajectories.append({"positions": np.array(pos_hist[g], dtype=np.int64),
                              "players": np.array(plr_hist[g], dtype=np.int64),
                              "actions": np.array(pos_hist[g], dtype=np.int64),

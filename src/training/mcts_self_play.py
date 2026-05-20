@@ -41,6 +41,8 @@ class MCTSSelfPlayRunner:
         plr_hist = [[] for _ in range(G)]
         mcts_policies = [[] for _ in range(G)]
         occupied_gpu = torch.zeros(G, N_CELLS, dtype=torch.bool, device=device)
+        p0_cpu = np.zeros((G, N_CELLS), dtype=bool)
+        p1_cpu = np.zeros((G, N_CELLS), dtype=bool)
         finished_cpu = [False] * G  # Python bool list, scanned once per move
 
         timing = {
@@ -67,6 +69,7 @@ class MCTSSelfPlayRunner:
             pos_hist[g].append(a)
             plr_hist[g].append(0)
             occupied_gpu[g, a] = True
+            p0_cpu[g, a] = True
 
         pos_batch = first_acts.unsqueeze(1)
         plr_batch = torch.zeros(G, 1, dtype=torch.long, device=device)
@@ -79,7 +82,7 @@ class MCTSSelfPlayRunner:
                 finished_cpu[g] = True
                 mcts_mgr.reset_game(g)
             else:
-                mcts_mgr.apply_move(g, a, occupied_gpu[g].cpu().numpy())
+                mcts_mgr.apply_move(g, a, p0_cpu[g], p1_cpu[g])
 
         timing["setup"] = time.perf_counter() - t0
 
@@ -260,11 +263,16 @@ class MCTSSelfPlayRunner:
                 r = gomoku_cpp.step(self.pool, g, action)
                 timing["game_step"] += time.perf_counter() - t_s
 
+                plr = plr_hist[g][-1]
                 if r != 0:
                     finished_cpu[g] = True
                     mcts_mgr.reset_game(g)
                 else:
-                    mcts_mgr.apply_move(g, action, occupied_gpu[g].cpu().numpy())
+                    if plr == 0:
+                        p0_cpu[g, action] = True
+                    else:
+                        p1_cpu[g, action] = True
+                    mcts_mgr.apply_move(g, action, p0_cpu[g], p1_cpu[g])
 
             move_count += 1
 
