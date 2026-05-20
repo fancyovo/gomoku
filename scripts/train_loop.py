@@ -181,7 +181,7 @@ def train_with_early_stop(model, trajectories):
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     p, v = model(pos, plr)
                 if L_ > 1:
-                    pp = p[:, :-1, :].float(); vv = v[:, :-1].float()
+                    pp = p[:, 1:, :].float(); vv = v[:, 1:].float()
                     tp = pol_t[:, 1:, :]; tv = val_t[:, 1:]; pm = m[:, 1:]
                     loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225), tp.reshape(-1, 225), vv.reshape(-1), tv.reshape(-1), pm.reshape(-1))
                     # First move loss: only on identity symmetry (sym=0) to avoid conflicting targets
@@ -206,7 +206,7 @@ def train_with_early_stop(model, trajectories):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 p, v = model(pos, plr)
             if L_ > 1:
-                pp = p[:, :-1, :].contiguous(); vv = v[:, :-1].contiguous()
+                pp = p[:, 1:, :].contiguous(); vv = v[:, 1:].contiguous()
                 tp = pol_t[:, 1:, :].contiguous(); tv = val_t[:, 1:].contiguous(); pm = m[:, 1:].contiguous()
                 loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225).float(), tp.reshape(-1, 225), vv.reshape(-1).float(), tv.reshape(-1), pm.reshape(-1))
                 sym0 = batch.get("sym", torch.zeros(B_, dtype=torch.long)) == 0
