@@ -68,7 +68,6 @@ int MCTSTree::select_leaf(float c_puct) {
     MCTSNode* node = &nodes[node_idx];
 
     while (node->expanded && !node->edges.empty() && !node->terminal) {
-        node->virtual_losses++;
         node->N_total++;
 
         int best_e = -1;
@@ -92,6 +91,9 @@ int MCTSTree::select_leaf(float c_puct) {
         sel_nodes.push_back(node_idx);
         sel_edges.push_back(best_e);
         sel_actions.push_back(edge.action);
+
+        // Virtual loss: bump edge N so subsequent leaves in this round avoid this path
+        edge.N += 3;
 
         if (edge.child_idx < 0) {
             int child_player = 1 - node->player;
@@ -247,7 +249,7 @@ MCTSManager::SelectResult MCTSManager::select_all() {
         int* plr_row = &res.plr_dense[i * max_pl];
         for (int j = 0; j < len; j++) {
             pos_row[j] = res.all_actions[off + j];
-            plr_row[j] = (game_players[g] + 1 + j) % 2;
+            plr_row[j] = (game_players[g] + j) % 2;
         }
 
         // Fill occ_dense: copy game occupied + path actions
@@ -354,9 +356,9 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
                 MCTSNode& n = tree.nodes[n_idx];
                 if (e_idx >= (int)n.edges.size()) continue;
                 MCTSEdge& e = n.edges[e_idx];
-                e.N++; e.W += v; n.N_total++;
-                n.virtual_losses = std::max(0, n.virtual_losses - 1);
                 v = -v;
+                e.N -= 2;       // undo virtual: 3 - 2 = net +1 N per leaf
+                e.W += v; n.N_total++;
             }
             continue;
         }
@@ -409,7 +411,9 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
         leaf.V = values[li];
         leaf.expanded = !leaf.edges.empty();
 
-        // Backup
+        // Backup: flip v so Q is from current node's (edge owner's) perspective.
+        // select_leaf added +3 virtual N to each edge for within-round diversity.
+        // Undo 2 of those so net N per leaf = +1 (3 - 2 = 1).
         float v = values[li];
         for (int i = (int)st.path_nodes.size() - 1; i >= 0; i--) {
             int n_idx = st.path_nodes[i];
@@ -418,11 +422,10 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
             MCTSNode& node = tree.nodes[n_idx];
             if (e_idx >= (int)node.edges.size()) continue;
             MCTSEdge& edge = node.edges[e_idx];
-            edge.N++;
-            edge.W += v;
-            node.N_total++;
-            node.virtual_losses = std::max(0, node.virtual_losses - 1);
             v = -v;
+            edge.N -= 2;       // undo virtual: 3 - 2 = net +1 N per leaf
+            edge.W += v;
+            node.N_total++;    // one real visit per node per leaf
         }
     }
 }

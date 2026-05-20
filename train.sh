@@ -3,11 +3,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEVICE="${DEVICE:-cuda}"
+STEPS="${STEPS:-500}"
 
 echo "=== Gomoku MCTS Training ==="
 echo "Checkpoints: checkpoints/train_loop/"
-echo "Length curve: output/train_length.png"
-echo "Device: $DEVICE"
+echo "Device: $DEVICE  Steps: $STEPS"
+echo "Auto-resumes from latest checkpoint"
 echo
 
-exec python -u scripts/train_loop.py --device "$DEVICE" 2>&1
+exec python -u scripts/train_loop.py --device "$DEVICE" --steps "$STEPS" 2>&1

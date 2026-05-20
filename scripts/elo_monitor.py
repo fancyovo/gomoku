@@ -89,7 +89,7 @@ def play_match(model_a, model_b):
         for mgr, mdl, kv in [(mgr_a, model_a, kva), (mgr_b, model_b, kvb)]:
             st = torch.from_numpy(active).to(DEVICE)
             dp = torch.zeros(len(active), 1, dtype=torch.long, device=DEVICE)
-            dplr = torch.zeros(len(active), 1, dtype=torch.long, device=DEVICE)
+            dplr = torch.full((len(active), 1), cp, dtype=torch.long, device=DEVICE)
             dl = torch.ones(len(active), dtype=torch.long, device=DEVICE)
             lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
             lp = lp.masked_fill(occ_gpu[active], -1e9); torch.cuda.synchronize()

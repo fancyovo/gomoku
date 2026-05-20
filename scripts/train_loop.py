@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from model import ModelConfig, GomokuTransformer
 from training.augment import SYM_TABLE, N_SYMS
-from training.loss import alphago_zero_loss
+from training.loss import alphago_zero_loss, reinforce_loss
 import gomoku_cpp
 
 # Inverse symmetry lookup: policy transform needs new_pos → old_pos (inverse of SYM_TABLE)
@@ -183,6 +183,10 @@ def train_with_early_stop(model, trajectories):
                     pp = p[:, :-1, :].float(); vv = v[:, :-1].float()
                     tp = pol_t[:, :-1, :]; tv = val_t[:, :-1]; pm = m[:, :-1]
                     loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225), tp.reshape(-1, 225), vv.reshape(-1), tv.reshape(-1), pm.reshape(-1))
+                    # Train first_move_logits with REINFORCE using game outcome
+                    fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
+                    fm_loss, _, _ = reinforce_loss(fm.float(), pos[:, 0], val_t[:, 0], m[:, 0])
+                    loss = loss + fm_loss
                     total += loss.item(); n_batch += 1
         return total / max(n_batch, 1)
 
@@ -201,6 +205,10 @@ def train_with_early_stop(model, trajectories):
                 pp = p[:, :-1, :].contiguous(); vv = v[:, :-1].contiguous()
                 tp = pol_t[:, :-1, :].contiguous(); tv = val_t[:, :-1].contiguous(); pm = m[:, :-1].contiguous()
                 loss, _, _ = alphago_zero_loss(pp.reshape(-1, 225).float(), tp.reshape(-1, 225), vv.reshape(-1).float(), tv.reshape(-1), pm.reshape(-1))
+                # Train first_move_logits with REINFORCE using game outcome
+                fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
+                fm_loss, _, _ = reinforce_loss(fm.float(), pos[:, 0], val_t[:, 0], m[:, 0])
+                loss = loss + fm_loss
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step(); opt.zero_grad()

@@ -98,7 +98,6 @@ class Trainer:
         loss_curve = []
 
         ent_coef = self._entropy_coef(step, total_steps)
-        self.optimizer.zero_grad()
 
         for batch in dataloader:
             pos = batch["positions"].to(self.device, non_blocking=True)
@@ -161,6 +160,11 @@ class Trainer:
 
             loss.backward()
 
+            if self.grad_clip > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
             total_loss += loss.item()
             if n_batches % ppl_interval == 0:
                 loss_curve.append((n_batches, loss.item()))
@@ -171,11 +175,6 @@ class Trainer:
 
             if max_batches and n_batches >= max_batches:
                 break
-
-        if self.grad_clip > 0:
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-        self.optimizer.step()
 
         metrics["train/time"] = time.perf_counter() - t0
         metrics["train/batches"] = n_batches

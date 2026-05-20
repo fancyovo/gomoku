@@ -7,8 +7,8 @@ GAMES="${GAMES:-256}"
 
 echo "=== Gomoku MCTS ELO Monitor ==="
 echo "Watching: checkpoints/train_loop/"
-echo "Games/pair: $GAMES"
-echo "ELO curve: output/elo_curve.png"
+echo "Games/pair: $GAMES (S=1, near-zero search)"
+echo "Plots: output/elo_curve.png + output/elo_heatmap.png"
 echo "Device: $DEVICE"
 echo
 
