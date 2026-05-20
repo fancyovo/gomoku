@@ -217,10 +217,10 @@ class Trainer:
         ent = -(probs * log_probs).nan_to_num(0.0).sum(dim=-1)
 
         ppl_by_len = []
-        for i in range(min(L - 1, 225)):
-            next_mask = mask[:, i + 1]
-            if next_mask.sum() > 0:
-                avg_ent = ent[next_mask, i].mean().item()
+        for i in range(min(L, 225)):
+            cur_mask = mask[:, i]
+            if cur_mask.sum() > 0:
+                avg_ent = ent[cur_mask, i].mean().item()
                 ppl_by_len.append((i, math.exp(avg_ent)))
             else:
                 break

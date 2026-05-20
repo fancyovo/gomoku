@@ -139,7 +139,7 @@ def train(model, trajectories):
                 with torch.autocast(device_type="cuda",dtype=torch.bfloat16): p,v=model(pos,plr)
                 if L_>1:
                     pp=p[:,:-1,:].float(); vv=v[:,:-1].float()
-                    tp=pol_t[:,:-1,:]; tv=val_t[:,:-1]; pm=m[:,:-1]
+                    tp=pol_t[:,1:,:]; tv=val_t[:,1:]; pm=m[:,1:]
                     loss,_,_=alphago_zero_loss(pp.reshape(-1,225),tp.reshape(-1,225),vv.reshape(-1),tv.reshape(-1),pm.reshape(-1))
                     fm=model.first_move_logits.unsqueeze(0).expand(B_,-1)
                     fl,_,_=reinforce_loss(fm.float(),pos[:,0],val_t[:,0],m[:,0])
@@ -156,7 +156,7 @@ def train(model, trajectories):
             with torch.autocast(device_type="cuda",dtype=torch.bfloat16): p,v=model(pos,plr)
             if L_>1:
                 pp=p[:,:-1,:].contiguous(); vv=v[:,:-1].contiguous()
-                tp=pol_t[:,:-1,:].contiguous(); tv=val_t[:,:-1].contiguous(); pm=m[:,:-1].contiguous()
+                tp=pol_t[:,1:,:].contiguous(); tv=val_t[:,1:].contiguous(); pm=m[:,1:].contiguous()
                 loss,_,_=alphago_zero_loss(pp.reshape(-1,225).float(),tp.reshape(-1,225),vv.reshape(-1).float(),tv.reshape(-1),pm.reshape(-1))
                 fm=model.first_move_logits.unsqueeze(0).expand(B_,-1)
                 fl,_,_=reinforce_loss(fm.float(),pos[:,0],val_t[:,0],m[:,0])
