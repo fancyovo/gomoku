@@ -30,24 +30,25 @@ def run_selfplay(model, device):
     mgr = gomoku_cpp.MCTSManager(G_, seed_base=np.random.randint(0, 2**31))
     mgr.c_puct = 1.0; mgr.dirichlet_eps = 0.25; mgr.dirichlet_alpha = 0.03
     mgr.leaves_per_game = M
-    mgr.init_roots(np.zeros((G_, 225), dtype=bool), np.zeros(G_, dtype=np.int32))
+    p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
+    mgr.init_roots(p0, p1, np.zeros(G_, dtype=np.int32))
     kv = model.create_cache(max_games=G_, max_cache_len=250)
 
     fa = model.sample_first_moves(G_, device)
     model.prefill(fa.unsqueeze(1), torch.zeros(G_, 1, dtype=torch.long, device=device), kv, list(range(G_)))
 
-    occupied = np.zeros((G_, 225), dtype=bool); finished_np = np.zeros(G_, dtype=bool)
+    finished_np = np.zeros(G_, dtype=bool)
     mcts_pols = [[] for _ in range(G_)]
     pos_hist = [[] for _ in range(G_)]; plr_hist = [[] for _ in range(G_)]
     pos_lens = np.zeros(G_, dtype=np.int32)
 
     for g in range(G_):
-        a = int(fa[g].item()); occupied[g, a] = True; pos_lens[g] = 1
+        a = int(fa[g].item()); p0[g, a] = True; pos_lens[g] = 1
         pos_hist[g].append(a); plr_hist[g].append(0)
         r = gomoku_cpp.step(pool, g, a)
         if r: finished_np[g] = True; mgr.reset_game(g)
-        else: mgr.apply_move(g, a, occupied[g])
-    occ_gpu = torch.from_numpy(occupied).to(device)
+        else: mgr.apply_move(g, a, p0[g], p1[g])
+    occ_gpu = torch.from_numpy(p0 | p1).to(device)
 
     while True:
         active = np.where(~finished_np)[0]
@@ -87,16 +88,18 @@ def run_selfplay(model, device):
         rp = mgr.get_root_policies()
         new_actions = np.zeros(len(active), dtype=np.int64)
         for i, g in enumerate(active):
-            pol = rp[g].copy(); pol[occupied[g]] = 0
+            pol = rp[g].copy(); pol[p0[g] | p1[g]] = 0
             if pol.sum() > 0: a = int(np.random.choice(225, p=pol / pol.sum()))
             else:
-                legal = np.where(~occupied[g])[0]
+                legal = np.where(~(p0[g] | p1[g]))[0]
                 a = int(np.random.choice(legal)) if len(legal) > 0 else 0
             new_actions[i] = a
             mcts_pols[g].append(pol.copy())
             plr = pos_lens[g] % 2
             pos_hist[g].append(a); plr_hist[g].append(plr)
-            occupied[g, a] = True; occ_gpu[g, a] = True; pos_lens[g] += 1
+            if plr == 0: p0[g, a] = True
+            else: p1[g, a] = True
+            occ_gpu[g, a] = True; pos_lens[g] += 1
 
         dec_pos = torch.from_numpy(new_actions).to(device)
         plr_now = np.array([1 - (pos_lens[g] % 2) for g in active], dtype=np.int64)
@@ -106,7 +109,7 @@ def run_selfplay(model, device):
         for i, g in enumerate(active):
             r = gomoku_cpp.step(pool, g, int(new_actions[i]))
             if r: finished_np[g] = True; mgr.reset_game(g)
-            else: mgr.apply_move(g, int(new_actions[i]), occupied[g])
+            else: mgr.apply_move(g, int(new_actions[i]), p0[g], p1[g])
 
     trajectories = []
     for g in range(G_):
@@ -114,7 +117,7 @@ def run_selfplay(model, device):
         L = pos_lens[g]; pols = mcts_pols[g]
         val_t = np.zeros(L, dtype=np.float32)
         for i in range(L):
-            plr = i % 2
+            plr = plr_hist[g][i]
             if r == 3: val_t[i] = 0.0
             elif r == 1: val_t[i] = 1.0 if plr == 0 else -1.0
             else: val_t[i] = 1.0 if plr == 1 else -1.0
@@ -222,13 +225,14 @@ def play_match(model_a, model_b, device, n_games=128):
     G_ = min(ELO_G, n_games)
     pool = gomoku_cpp.GamePool(G_); pool.reset_all()
 
+    p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
     mgr_a = gomoku_cpp.MCTSManager(G_, seed_base=0)
     mgr_a.c_puct = 1.0; mgr_a.leaves_per_game = ELO_M
-    mgr_a.init_roots(np.zeros((G_, 225), dtype=bool), np.zeros(G_, dtype=np.int32))
+    mgr_a.init_roots(p0, p1, np.zeros(G_, dtype=np.int32))
 
     mgr_b = gomoku_cpp.MCTSManager(G_, seed_base=1)
     mgr_b.c_puct = 1.0; mgr_b.leaves_per_game = ELO_M
-    mgr_b.init_roots(np.zeros((G_, 225), dtype=bool), np.zeros(G_, dtype=np.int32))
+    mgr_b.init_roots(p0.copy(), p1.copy(), np.zeros(G_, dtype=np.int32))
 
     kva = model_a.create_cache(max_games=G_, max_cache_len=250)
     kvb = model_b.create_cache(max_games=G_, max_cache_len=250)
@@ -236,27 +240,23 @@ def play_match(model_a, model_b, device, n_games=128):
     fa_a = model_a.sample_first_moves(G_, device)
     fa_b = model_b.sample_first_moves(G_, device)
 
-    occupied = np.zeros((G_, 225), dtype=bool)
     finished = np.zeros(G_, dtype=bool)
     winners = np.zeros(G_, dtype=np.int32)
     a_is_black = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
 
-    # First move: choose from black's model
     first_acts = np.zeros(G_, dtype=np.int64)
     for g in range(G_):
         fm = fa_a[g].item() if a_is_black[g] else fa_b[g].item()
-        first_acts[g] = fm; occupied[g, fm] = True
-
-    pos_batch_a = torch.tensor([[first_acts[g]] for g in range(G_) if a_is_black[g]], dtype=torch.long, device=device)
-    pos_batch_b = torch.tensor([[first_acts[g]] for g in range(G_) if not a_is_black[g]], dtype=torch.long, device=device)
+        first_acts[g] = fm; p0[g, fm] = True
 
     for g in range(G_):
         a = int(first_acts[g])
         r = gomoku_cpp.step(pool, g, a)
         if r: finished[g] = True; winners[g] = r
         else:
-            mgr_a.apply_move(g, a, np.zeros(225, dtype=bool))
-            mgr_b.apply_move(g, a, np.zeros(225, dtype=bool))
+            bp0 = np.zeros(225, dtype=bool); bp0[a] = True
+            mgr_a.apply_move(g, a, bp0, np.zeros(225, dtype=bool))
+            mgr_b.apply_move(g, a, bp0, np.zeros(225, dtype=bool))
 
     # Prefill with first move
     slots_all = list(range(G_))
@@ -265,12 +265,12 @@ def play_match(model_a, model_b, device, n_games=128):
     model_a.prefill(fa_t, torch.zeros(G_, 1, dtype=torch.long, device=device), kva, slots_all)
     model_b.prefill(fa_t, torch.zeros(G_, 1, dtype=torch.long, device=device), kvb, slots_all)
 
-    occ_gpu = torch.from_numpy(occupied).to(device)
-    pos_hist = [list(first_acts)] * G_  # simplified, just for length tracking
+    occ_gpu = torch.from_numpy(p0 | p1).to(device)
 
     for move in range(1, 200):
         active = np.where(~finished)[0]
         if len(active) == 0: break
+        cp = move % 2
 
         # MCTS for both models (root eval first, then multi-leaf)
         for mgr, mdl, kv in [(mgr_a, model_a, kva), (mgr_b, model_b, kvb)]:
@@ -279,7 +279,7 @@ def play_match(model_a, model_b, device, n_games=128):
             dplr = torch.full((len(active), 1), cp, dtype=torch.long, device=device)
             dl = torch.ones(len(active), dtype=torch.long, device=device)
             lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
-            lp = lp.masked_fill(occ_gpu[active], -1e9)
+            lp = lp.masked_fill(occ_gpu[active], -1e9); torch.cuda.synchronize()
             pp = torch.softmax(lp, -1).cpu().numpy().astype(np.float32)
             mgr.expand_roots(active.astype(np.int32), pp, lv.cpu().numpy().astype(np.float32))
 
@@ -307,12 +307,15 @@ def play_match(model_a, model_b, device, n_games=128):
 
         for i, g in enumerate(active):
             pol = rp_a[g] if ((cp == 0) == a_is_black[g]) else rp_b[g]
-            pol = pol.copy(); pol[occupied[g]] = 0
+            pol = pol.copy(); pol[p0[g] | p1[g]] = 0
             if pol.sum() > 0: a = int(np.random.choice(225, p=pol / pol.sum()))
             else:
-                legal = np.where(~occupied[g])[0]
+                legal = np.where(~(p0[g] | p1[g]))[0]
                 a = int(np.random.choice(legal)) if len(legal) > 0 else 0
-            new_actions[i] = a; occupied[g, a] = True; occ_gpu[g, a] = True
+            new_actions[i] = a
+            if cp == 0: p0[g, a] = True
+            else: p1[g, a] = True
+            occ_gpu[g, a] = True
 
         dec_pos = torch.from_numpy(new_actions).to(device)
         dec_plr = torch.full((len(active),), cp, dtype=torch.long, device=device)
@@ -324,8 +327,8 @@ def play_match(model_a, model_b, device, n_games=128):
             r = gomoku_cpp.step(pool, g, int(new_actions[i]))
             if r: finished[g] = True; winners[g] = r
             else:
-                mgr_a.apply_move(g, int(new_actions[i]), occupied[g])
-                mgr_b.apply_move(g, int(new_actions[i]), occupied[g])
+                mgr_a.apply_move(g, int(new_actions[i]), p0[g], p1[g])
+                mgr_b.apply_move(g, int(new_actions[i]), p0[g], p1[g])
 
     wins_a = wins_b = draws = 0
     for g in range(G_):
