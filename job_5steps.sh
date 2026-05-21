@@ -9,7 +9,8 @@
 #SBATCH --error=slurm_%j.err
 
 set -euo pipefail
-cd "$(dirname "$0")"
+PROJ_DIR="/home/scc/pb24511935/gomoku"
+cd "$PROJ_DIR"
 
 echo "=== Gomoku 5-Step Training + ELO Analysis ==="
 echo "Date: $(date)"
