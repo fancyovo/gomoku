@@ -25,6 +25,9 @@ checkpoints/
 .vscode/
 .idea/
 
+# Virtual env
+.venv/
+
 # Misc
 .DS_Store
 *.log
