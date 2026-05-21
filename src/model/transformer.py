@@ -417,13 +417,12 @@ class GomokuTransformer(nn.Module):
         leaf_idx = (path_lengths - 1).clamp(min=0)  # (b,)
         leaf_policy = policy[torch.arange(len(indices)), leaf_idx]
         leaf_value = value[torch.arange(len(indices)), leaf_idx]
-        # For non-root leaves (path_length > 1): model outputs value from mover's
-        # perspective (plr_dense encodes the mover). Backup expects from leaf player's
-        # perspective (= opponent of mover). Flip sign.
-        # Root (path_length == 1): value is already from root player's perspective. No flip.
-        is_leaf = path_lengths > 1
-        if is_leaf.any():
-            leaf_value = torch.where(is_leaf, -leaf_value, leaf_value)
+        # Value is from the player encoded at the leaf position (plr_dense[j]).
+        # C++ expand_roots stores it directly as root.V (root player's perspective).
+        # C++ expand_and_backup flips sign at each backup step:
+        #   v = values[li]; then v = -v for each ancestor edge
+        # So the value starts from leaf player's perspective and flips to parent's
+        # perspective at each level. No Python-side flip needed.
         return leaf_policy, leaf_value
 
     def load_state_dict(self, state_dict, strict=False):

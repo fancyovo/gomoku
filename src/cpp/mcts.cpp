@@ -68,7 +68,8 @@ int MCTSTree::select_leaf(float c_puct) {
     MCTSNode* node = &nodes[node_idx];
 
     while (node->expanded && !node->edges.empty() && !node->terminal) {
-        node->N_total++;
+        // N_total is incremented in expand_and_backup after real leaf evaluation.
+        // Virtual loss on edge.N handles within-round path diversification.
 
         int best_e = -1;
         float best_score = -1e10f;

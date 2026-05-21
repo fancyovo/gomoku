@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <cstring>
 #include "board.h"
 #include "game.h"
 #include "mcts.h"
@@ -85,13 +86,29 @@ PYBIND11_MODULE(gomoku_cpp, m) {
             out["n_total"] = res.n_total;
             if (max_pl > 0) {
                 int n_total = res.n_total;
-                // Dense arrays: reshape for Python
-                out["pos_dense"] = py::array_t<int>({n_total, max_pl}, {max_pl * (int)sizeof(int), (int)sizeof(int)}, res.pos_dense.data());
-                out["plr_dense"] = py::array_t<int>({n_total, max_pl}, {max_pl * (int)sizeof(int), (int)sizeof(int)}, res.plr_dense.data());
-                out["occ_dense"] = py::array_t<uint8_t>({n_total, MCTS_ACTIONS}, {MCTS_ACTIONS * (int)sizeof(uint8_t), (int)sizeof(uint8_t)}, res.occ_dense.data());
-                out["valid_mask"] = py::array_t<uint8_t>({(long)n_total}, res.valid_mask.data());
-                out["leaf_lengths"] = py::array_t<int>({(long)n_total}, res.leaf_lengths.data());
-                out["game_indices"] = py::array_t<int>({(long)n_total}, res.game_indices.data());
+                // Allocate numpy-owned arrays and copy data from res (which is
+                // destroyed when this lambda returns). Direct pointer borrowing
+                // would cause use-after-free.
+                auto pos_dense = py::array_t<int>({n_total, max_pl});
+                auto plr_dense = py::array_t<int>({n_total, max_pl});
+                auto occ_dense = py::array_t<uint8_t>({n_total, MCTS_ACTIONS});
+                auto valid_mask = py::array_t<uint8_t>({n_total});
+                auto leaf_lengths = py::array_t<int>({n_total});
+                auto game_indices = py::array_t<int>({n_total});
+
+                std::memcpy(pos_dense.mutable_data(), res.pos_dense.data(), n_total * max_pl * sizeof(int));
+                std::memcpy(plr_dense.mutable_data(), res.plr_dense.data(), n_total * max_pl * sizeof(int));
+                std::memcpy(occ_dense.mutable_data(), res.occ_dense.data(), n_total * MCTS_ACTIONS * sizeof(uint8_t));
+                std::memcpy(valid_mask.mutable_data(), res.valid_mask.data(), n_total * sizeof(uint8_t));
+                std::memcpy(leaf_lengths.mutable_data(), res.leaf_lengths.data(), n_total * sizeof(int));
+                std::memcpy(game_indices.mutable_data(), res.game_indices.data(), n_total * sizeof(int));
+
+                out["pos_dense"] = std::move(pos_dense);
+                out["plr_dense"] = std::move(plr_dense);
+                out["occ_dense"] = std::move(occ_dense);
+                out["valid_mask"] = std::move(valid_mask);
+                out["leaf_lengths"] = std::move(leaf_lengths);
+                out["game_indices"] = std::move(game_indices);
             }
             return out;
         })
