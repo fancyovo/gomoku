@@ -7,6 +7,7 @@
 #SBATCH --job-name=gomoku5b
 #SBATCH --output=slurm_%j.out
 #SBATCH --error=slurm_%j.err
+#SBATCH --nodelist=anode06
 
 set -euo pipefail
 PROJ_DIR="/home/scc/pb24511935/gomoku"
@@ -19,7 +20,7 @@ echo "Node: $(hostname)"
 source .venv/bin/activate
 
 echo "Python: $(which python)"
-python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 
 echo
 echo "Running continue_5steps.py..."
