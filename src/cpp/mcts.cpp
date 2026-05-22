@@ -330,6 +330,7 @@ void MCTSManager::expand_roots(const int* game_indices, int n_games,
         }
         root.V = values[i];
         root.expanded = !root.edges.empty();
+        if (root.expanded && root.N_total == 0) root.N_total = 1;
     }
 }
 
@@ -411,6 +412,7 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
 
         leaf.V = values[li];
         leaf.expanded = !leaf.edges.empty();
+        if (leaf.expanded && leaf.N_total == 0) leaf.N_total = 1;
 
         // Backup: flip v so Q is from current node's (edge owner's) perspective.
         // select_leaf added +3 virtual N to each edge for within-round diversity.
