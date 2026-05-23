@@ -67,3 +67,38 @@
 - `scripts/train_5steps_with_elo.py` — fixed value shift
 - `scripts/train_and_analyze.py` — fixed C++ API calls
 - `.gitignore` — added .venv/
+
+---
+
+## Round 2: Data Generation & Pretraining (05/23)
+
+| # | Description | Result |
+|---|-------------|--------|
+| 20 | CPU data generation: uniform dummy model + MCTS (512 sims, 1×512 serial) × 65536 games (128 files) | Data saved (~3.5GB) |
+| 21 | Pretrain 1 epoch on 65536 games: p from 0.99→0.95, v from 1.0→0.9 | Slight improvement |
+| 22 | Pretrained vs Uniform baseline (256 games, 8×64 MCTS): 115-141, WR=44.9% | Pretrained WORSE than uniform! |
+| 23 | Policy-only pretrain (freeze value): vs Uniform 126-130 WR=49.2% | No improvement |
+| 24 | Value-only pretrain (freeze policy): vs Uniform 123-133 WR=48.0% | No improvement |
+| 25 | 50-step training from pretrained (8×64 MCTS, game-level split, decay hl=5): step 1 test_v=4.0 | Catastrophic value loss |
+| 26 | Diagnosed test_v=4.0: caused by early_stop=20 running 20+ epochs, overfitting in 1 step | test_v stays 0.98-1.14 with 1-5 epochs |
+| 27 | Fixed collate shape bug: `pol[i,:L_-1]=s['mcts_policies']` fails when padded to L entries | Fixed with [:L_-1] |
+| 28 | Retried 50-step training with fixes: still no ELO improvement | Failed |
+| 29 | MCTS diagnosis: 2048 simulations (1×2048 serial) produces concentrated endgame (top1=92-97%) vs 512 sims (top1=5-12%) | 512 sims too few for 15×15 |
+| 30 | Dirichlet noise test: alpha=0.03 vs 0.3 vs eps=0.1 — no significant difference | Dirichlet not the bottleneck |
+| 31 | Single-game MCTS trace: all moves before terminal have ent≈4.7-5.2 (near-uniform); only final winning move ent≈0.2 | MCTS can only find depth-1 terminals |
+
+## Key Conclusions (Round 2)
+
+1. **512 sims + uniform prior + 15×15 = near-uniform MCTS visit distributions** at all positions except the final winning move. Data lacks sufficient signal for policy learning.
+2. **2048 sims** produces concentrated endgame distributions (top1=92-97%) but still can't see beyond depth 1.
+3. **Pretraining on 65536 games of low-quality data** gives slight loss improvement (p: 0.99→0.95, v: 1.0→0.9) but doesn't improve playing strength.
+4. **The fundamental bottleneck**: MCTS with uniform/random model on 15×15 cannot produce informative training targets. The search depth is limited to 1 (only direct winning moves are found).
+5. **Possible ways forward**: (a) much more simulations (e.g., 3200+), (b) smaller board (9×9), (c) use a heuristic value function instead of zero/uniform for data generation, (d) pure RL approach without MCTS distillation.
+
+## Current State (end of Round 2)
+
+- All known code bugs are fixed
+- Training pipeline is correct (game-level split, proper normalization, decay weights)
+- Value head learns quickly but overfits; policy head learns almost nothing
+- MCTS with random model on 15×15 cannot bootstrap the training
+- The AlphaZero-style distillation paradigm is not viable with current compute budget (512 sims, 15×15 board)
