@@ -53,7 +53,7 @@ int MCTSTree::create_child(int parent_idx, int action, int child_player) {
     const uint64_t* stones = (mover == 0) ? child.p0_stones : child.p1_stones;
     if (check_win_func(stones, action)) {
         child.terminal = true;
-        child.terminal_value = -1.0f;  // from leaf player's perspective: mover won, leaf lost
+        child.terminal_value = 1.0f;   // from mover's perspective: mover won
     }
     nodes.push_back(child);
     return child_idx;
@@ -358,9 +358,9 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
                 MCTSNode& n = tree.nodes[n_idx];
                 if (e_idx >= (int)n.edges.size()) continue;
                 MCTSEdge& e = n.edges[e_idx];
-                v = -v;
-                e.N -= 2;       // undo virtual: 3 - 2 = net +1 N per leaf
+                e.N -= 2;
                 e.W += v; n.N_total++;
+                v = -v;
             }
             continue;
         }
@@ -414,7 +414,8 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
         leaf.expanded = !leaf.edges.empty();
         if (leaf.expanded && leaf.N_total == 0) leaf.N_total = 1;
 
-        // Backup: flip v so Q is from current node's (edge owner's) perspective.
+        // Backup: values[li] is from last mover's perspective (= first edge owner).
+        // Add to edge.W first, then flip for next level up.
         // select_leaf added +3 virtual N to each edge for within-round diversity.
         // Undo 2 of those so net N per leaf = +1 (3 - 2 = 1).
         float v = values[li];
@@ -425,10 +426,10 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
             MCTSNode& node = tree.nodes[n_idx];
             if (e_idx >= (int)node.edges.size()) continue;
             MCTSEdge& edge = node.edges[e_idx];
-            v = -v;
-            edge.N -= 2;       // undo virtual: 3 - 2 = net +1 N per leaf
+            edge.N -= 2;
             edge.W += v;
-            node.N_total++;    // one real visit per node per leaf
+            node.N_total++;
+            v = -v;
         }
     }
 }

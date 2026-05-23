@@ -28,6 +28,9 @@ checkpoints/
 # Virtual env
 .venv/
 
+# Slurm logs
+slurm_logs/
+
 # Misc
 .DS_Store
 *.log
