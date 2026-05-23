@@ -27,7 +27,7 @@ from model import ModelConfig, GomokuTransformer
 from training.augment import SYM_TABLE, N_SYMS
 _INV_SYM = [0, 3, 2, 1, 4, 5, 6, 7]
 INV_SYM_TABLE = SYM_TABLE[_INV_SYM]
-from training.loss import alphago_zero_loss, reinforce_loss
+from training.loss import alphago_zero_loss
 import gomoku_cpp
 
 DEVICE = torch.device('cuda')
@@ -37,8 +37,8 @@ TRAIN_BATCH = 128
 MAX_EPOCHS = 100000
 EARLY_STOP = 20
 N_STEPS = 5
-ELO_G, ELO_M, ELO_S = 128, 4, 16
-CHECKPOINT_DIR, OUTPUT_DIR = 'checkpoints/train_fix', 'output'
+ELO_G, ELO_M, ELO_S = 256, 4, 64
+CHECKPOINT_DIR, OUTPUT_DIR = 'checkpoints/train_v3', 'output'
 
 # ========== Self-play (Dirichlet ON for exploration) ==========
 def run_selfplay(model):
@@ -161,7 +161,6 @@ def train_with_early_stop(model, trajectories):
         plr = torch.zeros(B_, max_len, dtype=torch.long)
         pol = torch.zeros(B_, max_len, 225)
         val_t = torch.zeros(B_, max_len, 2)
-        val_w = torch.zeros(B_, max_len)
         mask = torch.zeros(B_, max_len, dtype=torch.bool)
         for i, s in enumerate(batch):
             L_ = s['actual_len']
@@ -169,11 +168,8 @@ def train_with_early_stop(model, trajectories):
             pol[i, :L_-1] = s['mcts_policies']
             val_t[i, :L_] = s['value_targets']
             mask[i, :L_] = True
-            for j in range(L_):
-                d = L_ - 1 - j
-                val_w[i, j] = 0.5 ** (d / 5.0)
         return {'positions': pos, 'players': plr, 'mcts_policies': pol,
-                'value_targets': val_t, 'value_weights': val_w, 'mask': mask}
+                'value_targets': val_t, 'mask': mask}
     train_ds = DS(train_samples, list(range(len(train_samples))))
     test_ds = DS(test_samples, list(range(len(test_samples))))
 
@@ -189,16 +185,11 @@ def train_with_early_stop(model, trajectories):
                     p, v = model(pos, plr)
                 if L_ > 1:
                     pp = p[:, :-1, :].float(); vv = v[:, :-1, :].float()
-                    tp = pol_t[:, :-1, :]; tv = val_t[:, :-1, :]
-                    tw = batch['value_weights'].to(DEVICE)[:, :-1]; pm = m[:, :-1]
+                    tp = pol_t[:, :-1, :]; tv = val_t[:, :-1, :]; pm = m[:, :-1]
                     loss, pl, vl = alphago_zero_loss(
                         pp.reshape(-1, 225), tp.reshape(-1, 225),
-                        vv.reshape(-1, 2), tv.reshape(-1, 2), pm.reshape(-1),
-                        value_weights=tw.reshape(-1))
-                    rew_scalar = val_t[:, 0, 0] - val_t[:, 0, 1]
-                    fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
-                    fl, _, _ = reinforce_loss(fm.float(), pos[:, 0], rew_scalar, m[:, 0])
-                    total_loss += (loss + fl).item(); n_batch += 1
+                        vv.reshape(-1, 2), tv.reshape(-1, 2), pm.reshape(-1))
+                    total_loss += loss.item(); n_batch += 1
         return total_loss / max(n_batch, 1) if n_batch > 0 else 0.0
 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
@@ -218,10 +209,7 @@ def train_with_early_stop(model, trajectories):
                 loss, pl, vl = alphago_zero_loss(
                     pp.reshape(-1, 225).float(), tp.reshape(-1, 225),
                     vv.reshape(-1, 2).float(), tv.reshape(-1, 2), pm.reshape(-1))
-                rew_scalar = val_t[:, 0, 0] - val_t[:, 0, 1]
-                fm = model.first_move_logits.unsqueeze(0).expand(B_, -1)
-                fl, _, _ = reinforce_loss(fm.float(), pos[:, 0], rew_scalar, m[:, 0])
-                loss = loss + fl; loss.backward()
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step(); opt.zero_grad()
         test_loss = eval_epoch(test_ds)
@@ -354,6 +342,8 @@ for step in range(N_STEPS):
 
     # Per-component loss on a subset
     model.eval()
+    # Quick eval on train subset to get p/v components (no decay, no REINFORCE)
+    model.eval()
     samples = []
     for t_ in traj[:128]:
         L = t_['actual_len']
@@ -364,25 +354,23 @@ for step in range(N_STEPS):
     B_ = len(samples)
     pos_b = torch.zeros(B_, max_len, dtype=torch.long); plr_b = torch.zeros(B_, max_len, dtype=torch.long)
     pol_b = torch.zeros(B_, max_len, 225); val_b = torch.zeros(B_, max_len, 2)
-    val_w_b = torch.zeros(B_, max_len); mask_b = torch.zeros(B_, max_len, dtype=torch.bool)
+    mask_b = torch.zeros(B_, max_len, dtype=torch.bool)
     for i, s in enumerate(samples):
         L_ = s['actual_len']
         pos_b[i,:L_] = s['positions']; plr_b[i,:L_] = s['players']
         pol_b[i,:L_-1] = s['mcts_policies']; val_b[i,:L_] = s['value_targets']; mask_b[i,:L_] = True
-        for j in range(L_):
-            d = L_ - 1 - j
-            val_w_b[i, j] = 0.5 ** (d / 5.0)
-    pos_b = pos_b.to(DEVICE); plr_b = plr_b.to(DEVICE); pol_b = pol_b.to(DEVICE); val_b = val_b.to(DEVICE); val_w_b = val_w_b.to(DEVICE); mask_b = mask_b.to(DEVICE)
+    pos_b = pos_b.to(DEVICE); plr_b = plr_b.to(DEVICE); pol_b = pol_b.to(DEVICE); val_b = val_b.to(DEVICE); mask_b = mask_b.to(DEVICE)
     with torch.inference_mode():
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             p, v = model(pos_b, plr_b)
     pp = p[:, :-1, :].float(); vv = v[:, :-1, :].float()
-    tp = pol_b[:, :-1, :]; tv = val_b[:, :-1, :]; tw = val_w_b[:, :-1]; pm = mask_b[:, :-1]
-    _, pl, vl = alphago_zero_loss(pp.reshape(-1,225), tp.reshape(-1,225), vv.reshape(-1,2).float(), tv.reshape(-1,2), pm.reshape(-1), value_weights=tw.reshape(-1))
+    tp = pol_b[:, :-1, :]; tv = val_b[:, :-1, :]; pm = mask_b[:, :-1]
+    _, pl, vl = alphago_zero_loss(pp.reshape(-1,225), tp.reshape(-1,225), vv.reshape(-1,2).float(), tv.reshape(-1,2), pm.reshape(-1))
     history['train_p'].append(float(pl.item())); history['train_v'].append(float(vl.item()))
 
     print(f'[step {step+1:3d}/{N_STEPS}] len={avg_len:.0f} sp={t_sp:.0f}s tr={t_tr:.0f}s '
-          f'epoch={best_ep} test_loss={best_loss:.4f} '
+          f'epoch={best_ep} '
+          f'test_loss={best_loss:.4f} (p+v, no decay) '
           f'train_p={pl.item():.3f} train_v={vl.item():.3f} '
           f'B={rc.get(1, 0)} W={rc.get(2, 0)} D={rc.get(3, 0)} '
           f'BWR={bw/(bw+ww)*100:.0f}%', flush=True)
