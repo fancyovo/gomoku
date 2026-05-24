@@ -101,7 +101,7 @@
 - Training pipeline is correct (game-level split, proper normalization, decay weights)
 - Value head learns quickly but overfits; policy head learns almost nothing
 - MCTS with random model on 15×15 cannot bootstrap the training
-- The AlphaZero-style distillation paradigm is not viable with current compute budget (512 sims, 15×15 board)
+- Note: Subsequent Round 3 findings invalidated this conclusion; the training pipeline was fixed and shown to work.
 
 ---
 
@@ -128,27 +128,28 @@
 | 48 | 05/24 | **step_9 diagnosis**: Value head broken — always outputs V=+0.08~+0.14 regardless of board state. MCTS degenerates back to BFS despite strong policy prior (H8=0.0126). Explains why step_9 (ELO 1600) < step_2 (ELO 1802) | Value overfitting identified |
 | 49 | 05/24 | **step_2 policy-only ablation**: vs noisy_uniform=94.9%, vs step_0=95.7%, vs step_2=54.7%, vs step_9=57.8%. Policy head alone is excellent! | Confirms policy DID learn |
 
-## Key Conclusions (Round 3)
+## Key Findings (Round 3)
 
-1. **MCTS sign bug (48e2c21)**: The backup loop applied `v=-v` BEFORE `e.W+=v`, inverting all Q values. This caused "learned suicide" in earlier rounds. Fixed by swapping order (add-then-flip) and unifying terminal_value=+1.0.
+1. **MCTS sign bug (48e2c21)**: The backup loop applied `v=-v` BEFORE `e.W+=v`, inverting all Q values. Fixed by swapping order (add-then-flip) and unifying terminal_value=+1.0.
 
-2. **S=16 structural suicide**: Even with the sign fix, MCTS with Q=0 (no value signal) and S=16 explores only 64/225 root actions — the top-64 by policy prior. Any non-uniform prior produces a subset systematically worse than uniform random. This is NOT a code bug but a fundamental property of low-simulation MCTS. Two noisy models cancel out (53.1% vs each other). S=64 avoids this because 4×64=256 > 225, exploring all actions.
+2. **S=16 + Q=0 MCTS structural property**: With S=16 and no value signal, MCTS explores only M×S=64 of 225 root actions — those with highest policy prior. Uniform+noise(std=0.001) vs clean Uniform achieved only 5.9% WR. Two noisy models vs each other: 53.1%. This means any deviation from perfect uniformity causes large WR shifts at S=16, regardless of move quality. S=64 does not show this because 4×64=256 > 225.
 
-3. **Training actually works**: With a fair noisy-uniform baseline, ELO improves consistently: step_0→step_2 gained 501+ ELO. step_2 peaks at 1802 (pretrain10) or 1633 (train_v3).
+3. **Training with noisy-uniform baseline (S=16, separate ELO runs — not cross-comparable)**:
+   - train_v3 (from scratch, 5 steps, 1 run): step_0=1318, step_1=1564, step_2=1610, step_3=1623, step_4=1611. ΔELO=+293.
+   - pretrain10 (pretrain 1 epoch on 65K old data + 10 self-play steps, separate run): pretrain=912, step_0=939, step_1=1670, step_2=1802, step_3=1745, step_4=1701, ..., step_9=1600. ΔELO(step_0→9)=+661.
 
-4. **Policy head learns well**: step_2's policy-only beats noisy_uniform 94.9%, step_0 95.7%. The policy learned to concentrate on center positions (H8, I11, K9) and guide MCTS effectively.
+4. **Policy learning**: step_2 policy-only vs noisy_uniform: 243-13 (94.9% WR); vs step_0 policy-only: 245-11 (95.7% WR); vs step_9 policy-only: 148-108 (57.8% WR); vs self: 140-116 (54.7% WR). Policy head improved dramatically from step_0 to step_2, concentrating on center positions (H8, I11, K9).
 
-5. **Value head can overfit**: step_9's value head outputs constant +0.08~+0.14, losing all discriminative power. This causes MCTS to degenerate back to BFS.
+5. **Value learning**: step_2 value-only vs noisy_uniform at S=16: 81.6% WR (ablation on train_v3). In detailed game traces, step_2 value is calibrated (V>0 when winning, V<0 when losing), while step_9 value is near-constant +0.08~+0.14 regardless of board state, causing MCTS to degenerate to BFS.
 
-6. **Pretraining on old data is harmful**: The 65K games generated with old (buggy) MCTS produce near-uniform targets. Pretraining on them gives ELO 912, worse than noisy_uniform at 1119.
+6. **Pretrain10 ELO trend (single run, noisy_uniform baseline at S=16)**: pretrain=912, step_0=939, step_1=1670, step_2=1802. The pretrained model alone was weaker than noisy_uniform (1119) in this run, but self-play training produced rapid improvement (step_0→step_1 +731 ELO).
 
-7. **MCTS Dirichlet noise is correctly applied**: The earlier AI's analysis claiming missing Dirichlet noise was wrong — `expand_roots` is called every move and always adds noise during self-play.
+7. **Dirichlet noise confirmation**: `expand_roots` is called every move during self-play and always applies Dirichlet noise. The earlier analysis claiming missing noise was incorrect.
 
 ## Current State (end of Round 3)
 
 - **MCTS sign bug fixed** (48e2c21)
-- **Training pipeline working**: pretrain10 shows clear ELO improvement (Δ+661 over 10 steps)
-- **Policy learning confirmed**: step_2 policy-only achieves 94.9% vs noisy baseline
-- **Best model**: pretrain10/step_000002.pt (ELO 1802 at S=16)
-- **Key insight**: S≥N_actions/M ≈ 57 needed for Q=0 MCTS to avoid structural suicide. S=64 (self-play) is sufficient; S=16 (evaluation) is not.
-- **Open issue**: Value head overfitting in later steps (step_9). Early stopping or value head regularization needed.
+- **Best model**: pretrain10/step_000002.pt (ELO 1802 at S=16, policy-only 94.9% vs noisy_uniform)
+- **Pipeline verified**: self-play training produces measurable ELO improvement
+- **S≥57 needed** for Q=0 MCTS to avoid structural concentration on ~64 actions
+- **Open**: Value head overfitting in later steps (step_9); whether pretraining helps vs from-scratch not yet tested in a single ELO run
