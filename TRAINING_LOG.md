@@ -153,3 +153,40 @@
 - **Pipeline verified**: self-play training produces measurable ELO improvement
 - **S≥57 needed** for Q=0 MCTS to avoid structural concentration on ~64 actions
 - **Open**: Value head overfitting in later steps (step_9); whether pretraining helps vs from-scratch not yet tested in a single ELO run
+
+---
+
+## Round 4: G=2048, Policy Collapse & S=16 Amplification (05/24)
+
+| # | Date | Description | Result |
+|---|------|-------------|--------|
+| 50 | 05/24 | **d_model=192 big model** pretrain+10 steps, ELO at S=16. d_model 128→192, d_ff 256→384 | ELO flat/declining, cancelled early |
+| 51 | 05/24 | **G=2048 self-play** (original model size): pretrain + 10 steps, ELO at S=16 | step_0=1713 peak, oscillating, ΔELO=-135 |
+| 52 | 05/24 | G=2048 step_0 vs step_8 ablation: step0_pol=16%, step0_val=61%, step8_pol loses, step8_val=78.5% vs step0. Both full: 53% | step8 has excellent V, terrible P |
+| 53 | 05/24 | G=2048 step_8 self-play traces: policy `I6=0.53` (53% on single position!). Static preference for I6/F9/J7/G10 regardless of board state. 23-move game | Policy collapsed to fixed preferences |
+| 54 | 05/24 | G=2048 continue steps 10-14 from step_9. ELO with 17 models (noisy_uniform + pretrain + step_0~14) at S=16 | step_10-13 stable (1651-1729), step_14 crashes to 1209 |
+| 55 | 05/24 | **step_14 collapse diagnosis**: V always positive (+0.06~+0.19 regardless of win/loss). Policy split personality: entropy 5.0 as BLACK (near-uniform), entropy 3.9 as WHITE (moderate). Self-play 79 moves (3x S13's 28) | Policy polarization by color, value overconfident |
+| 56 | 05/24 | **step_13 vs step_14 ablation**: S13_pol vs S14=93%, S13_val vs S14=100%, S13 vs S14_pol=97%, S13 vs S14_val=33%, S13 vs S14=97% | S14_value beats S13 67% alone! But S14_policy is catastrophic |
+| 57 | 05/24 | **S14 color test**: S13(B) vs S14(W)=94%, S13(W) vs S14(B)=97%. S14 loses regardless of color | Color split not the main cause |
+| 58 | 05/24 | **Raw policy comparison**: S13 vs S14 policy evaluated directly (no MCTS) on same board states. S13 avg prob=0.036, S14=0.028; avg rank 12.2 vs 11.8; entropy 3.89 vs 4.06 | Raw policies nearly identical! S14's policy is fine outside MCTS |
+| 59 | 05/24 | **step_10 GIF**: self-play visualization saved to output/step10_selfplay.gif (32 frames) | Visual confirmation of play style |
+
+## Key Findings (Round 4)
+
+1. **G=2048 produces stronger step_0 but unstable training**: step_0=1713 (vs G=512's 939), but later steps oscillate and eventually collapse (step_14=1209).
+
+2. **Policy collapse is the dominant failure mode**: Both step_8 (G=2048) and step_14 show policy degeneracy — extreme concentration on few positions (I6=0.53) or split personality by color. The value head remains good (S14_value beats S13 67%) but can't compensate.
+
+3. **S=16 MCTS catastrophically amplifies small policy differences**: S13 and S14 have nearly identical raw policy (entropy 3.89 vs 4.06, rank 12.2 vs 11.8 on chosen moves). But S14_policy loses 97% in MCTS while S14_value wins 67%. The tiny entropy gap (0.17) causes S14's top-64 actions to include enough bad moves that 64 simulations can't filter out.
+
+4. **Value head decoupled from policy collapse**: In step_14, the value head alone is strong enough to beat S13 (67% WR), but the policy is so harmful that the full model loses 97%. This is the same "1+1<0" pattern seen in Round 3 (step_9 in pretrain10 had the reverse: broken V, strong P).
+
+5. **Self-play diagnostics are robust**: The G=1 game trace methodology with per-move policy/V/MCTS dumps provides clear qualitative evidence of model health, consistent with quantitative ELO and ablation results.
+
+## Current State (end of Round 4)
+
+- **Best model**: pretrain10/step_000002.pt (ELO 1802, G=512, stable training)
+- **G=2048 models**: step_10 at ELO 1727, but training unstable (step_14 collapse)
+- **Key open problem**: How to prevent policy collapse in later self-play steps
+- **S=16 sensitivity confirmed**: Even slightly elevated policy entropy (4.06 vs 3.89) causes catastrophic MCTS degradation
+- **GIF generation pipeline**: Working for qualitative model inspection
