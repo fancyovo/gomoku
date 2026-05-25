@@ -1,124 +1,61 @@
-# Gomoku Transformer
+# Gomoku AlphaZero
 
-A Transformer-based Gomoku (15×15) AI trained via pure REINFORCE policy gradient with self-play.
+15×15 Gomoku AI trained via AlphaZero-style self-play with MCTS + policy/value distillation.
 
 ## Architecture
 
-- **Model**: Decoder-only Transformer, 16 layers, d_model=128, 4 heads, d_ff=256 (~2.8M params)
-- **Inference**: Autoregressive with KV cache, BF16 mixed precision, 4096-game micro-batches
-- **Board engine**: C++17 bitboard with OpenMP parallelism, pybind11 bridge to Python
-- **Training**: Pure REINFORCE — self-play → policy gradient, no value network, no MCTS
-- **Data**: 32,768 games per step, page_size=32, action masking (occupied positions → -inf)
+- **Model**: 4+4+4 Transformer (shared + policy + value branches), d_model=128, 4 heads, d_ff=256 (~2.15M params)
+- **Value head**: 2-class softmax → scalar = p_win - p_lose (CE/ln(2) loss)
+- **Policy head**: 225-class softmax (CE/ln(225) loss)
+- **Inference**: KV cache, bf16 autocast
+- **Board engine**: C++17 bitboard with OpenMP, pybind11 bridge
 
-## Quick Start
-
-```bash
-# Install
-pip install -e .
-
-# Train (base experiment)
-CONFIG=configs/default.yaml ./run.sh
-
-# ELO monitor (separate GPU)
-./elo_watch.sh
-```
-
-## Ablation Experiments
+## Training Pipeline
 
 ```bash
-# Fixed entropy coefficient (no annealing)
-CONFIG=configs/abl_fixed_entropy.yaml ./run.sh
+# Generate initial pool data
+python scripts/gen_data.py --output_dir data/init_pool --num_files 8
 
-# Exponential reward decay (half-life = 10 steps)
-CONFIG=configs/abl_reward_decay.yaml ./run.sh
+# Train from scratch (no pretrain)
+python scripts/train_replay.py \
+    --G 512 --M 8 --S 64 --n_steps 10 \
+    --ckpt_dir checkpoints/run1 \
+    --data_dir data/init_pool \
+    --from_scratch
 
-# Data augmentation (8× symmetry)
-CONFIG=configs/abl_augment.yaml ./run.sh
-
-# Scaled-up model (24 layers, d_ff=384)
-CONFIG=configs/abl_scale_up.yaml ./run.sh
+# ELO evaluation
+python scripts/eval_elo_curve.py --ckpt_dir checkpoints/run1
 ```
 
-Checkpoints auto-save to `checkpoints/<experiment_name>/`. The ELO monitor watches all directories
-and produces a multi-curve comparison plot at `output/elo_curve.png`.
+**Replay buffer**: Pool size = 8×G (4096 games). Each step: self-play G games → discard G random old → add new → train 1 epoch on full pool.
 
-## Base Experiment Results
+**Alternating optimization**: Policy-only and value-only backward+step per batch, avoiding gradient scale imbalance.
 
-**Training**: 1000 steps completed, 100 checkpoints (step 9–999), ~32K games/step.
+## Key Files
 
-**ELO trajectory** (512 games/pair):
+| File | Purpose |
+|------|---------|
+| `src/model/transformer.py` | GomokuTransformer (4+4+4 split architecture) |
+| `src/model/embeddings.py` | ActionEmbedding (position + player + spatial coord) |
+| `src/training/loss.py` | alphago_zero_loss (policy CE + value CE) |
+| `src/training/replay.py` | Replay buffer, augment, collate, train loop, self-play |
+| `src/training/augment.py` | 8× D4 symmetry augmentation |
+| `src/cpp/mcts.cpp` | MCTS (PUCT, Dirichlet noise, virtual loss) |
+| `scripts/train_replay.py` | Main training entry point |
+| `scripts/eval_elo_curve.py` | ELO evaluation + curve plot |
+| `scripts/gen_data.py` | Initial pool data generation |
 
-| Phase | Steps | ELO Range | Characteristics |
-|-------|-------|-----------|-----------------|
-| Random | 0–29 | 578→1224 | Learned "play in center, not corners" |
-| Growth | 29–149 | 1224→1512 | Learned directional play, building lines |
-| Plateau | 149–349 | ~1400–1500 | Stable but not improving |
-| Surge | 349–539 | 1497→**1909** | Developed sharp attacking tactics (column 9 vertical line) |
-| Regression | 539–999 | 1909→1543 | Strategy narrowed, lost adaptability |
+## Results
 
-**Peak performance**: step_000539 (ELO 1909) — systematically builds 5-in-a-row in ~18 moves.
+| Experiment | Steps | Peak ELO | Notes |
+|------------|-------|----------|-------|
+| pretrain10 | pretrain + 10 | 1802 (step_2) | Old buggy pretrain data, best single model |
+| scratch5 | 5 (from scratch) | 1795 (step_4) | No pretrain, replay buffer only |
+| scratch15 | 15 (from scratch) | ~1800 (step_2-4) | Oscillating after peak |
+| G=2048 | pretrain + 14 | 1729 (step_11) | Training unstable, step_14 collapse |
 
-**Key findings**:
+## Known Issues
 
-1. **REINFORCE without value function oscillates**. The model cycles between discovering new tactics
-   and overfitting to them. No monotonic improvement.
-
-2. **Action masking is essential**. Without it, the model converges to 100% illegal moves
-   (copying the last input token). Masking occupied positions during both inference and training
-   eliminates this failure mode.
-
-3. **Logit-target shift is critical**. The model's `logits[:, t]` is computed from `positions[:, 0..t]`
-   via causal attention, so it should predict `positions[:, t+1]`. Training it to predict
-   `positions[:, t]` causes the model to learn a trivial copy task.
-
-4. **Strong non-transitivity**. 38% of checkpoint pairs have the earlier model beating the
-   later one. Different checkpoints develop mutually countering strategies (rock-paper-scissors).
-
-5. **Game length decreases with skill**. Random models average 72 moves; trained models
-   average 30–35 moves. Better models end games faster through deliberate attacking.
-
-## Configuration
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `model.d_model` | 128 | Hidden dimension |
-| `model.n_layers` | 16 | Transformer layers |
-| `model.n_heads` | 4 | Attention heads |
-| `training.lr` | 1e-3 | Learning rate |
-| `training.entropy_coef` | 0.01 | Initial entropy coefficient |
-| `training.entropy_fixed` | null | Freeze entropy (skip annealing) |
-| `training.reward_decay_half_life` | null | Exponential reward decay |
-| `training.games_per_step` | 32768 | Self-play games per training step |
-| `training.page_size` | 32 | Block size for batched inference |
-| `training.train_batch_size` | 512 | Training batch size |
-| `training.augment` | false | 8× symmetry data augmentation |
-
-## ELO Monitor
-
-```bash
-./elo_watch.sh                           # default: 512 games/pair
-GAMES=256 BATCH=128 ./elo_watch.sh       # faster, less accurate
-```
-
-- Watches all `checkpoints/*/` directories
-- Randomly samples unplayed checkpoint pairs
-- Caches results in `elo_caches/<experiment>.json`
-- Produces `output/elo_curve.png` with all experiments overlaid
-
-## Project Structure
-
-```
-gomoku_transformer/
-├── configs/           # YAML configs (base + 4 ablations)
-├── src/
-│   ├── cpp/          # C++ board engine (bitboard + OpenMP)
-│   ├── model/        # Transformer (RMSNorm, SwiGLU, FlashAttention)
-│   ├── training/     # Self-play runner, REINFORCE trainer, DataLoader
-│   └── monitoring/   # Wandb logger
-├── scripts/          # train.py, elo_watch.py, elo_tournament.py
-├── checkpoints/      # Per-experiment checkpoint directories
-├── elo_caches/       # ELO pairwise result caches
-├── output/           # Plots and analysis output
-├── run.sh            # Training launcher
-└── elo_watch.sh      # ELO monitor launcher
-```
+1. **Policy head stagnation**: test_p flat at ~0.984 despite value head improvement. Model plays via strong value signal.
+2. **S=16 sensitivity**: At low simulation counts, tiny policy non-uniformities cause large ELO shifts.
+3. **Replay buffer slow turnover**: 1/8 replacement per step means old data dominates early training.
