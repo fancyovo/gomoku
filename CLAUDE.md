@@ -8,9 +8,9 @@
 - Best models: scratch5/step_4 (ELO 1795), pretrain10/step_2 (ELO 1802)
 
 ## Cluster Resources
-- Partition: Students, 2×GPU, 16×CPU, 1-day time limit
+- Partition: Students, 2×GPU, 24×CPU, 1-day time limit
 - Can run 2 jobs simultaneously (e.g., training + ELO monitor)
-- SLURM defaults: `--gres=gpu:1 --cpus-per-task=8 --mem=32G --time=04:00:00`
+- SLURM defaults: `--gres=gpu:1 --cpus-per-task=12 --mem=32G --time=04:00:00`
 
 ## Memory
 Project memory is stored in `MEMORY.md` (index) + `memory/` directory (entries).
