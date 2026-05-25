@@ -39,8 +39,11 @@ def main():
                         help='Skip ELO tournament after training')
     parser.add_argument('--from_scratch', action='store_true',
                         help='Start from random model, no pretraining')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='DataLoader worker processes')
     args = parser.parse_args()
 
+    torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
     os.makedirs(args.ckpt_dir, exist_ok=True)
     device = torch.device('cuda')
     cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15)
@@ -79,7 +82,7 @@ def main():
         tr_ds = GameDataset(tr_aug)
         te_ds = GameDataset(te_aug)
 
-        tp, tv = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch)
+        tp, tv = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
         print(f"  Pretrain done: test_p={tp:.4f} test_v={tv:.4f}")
         model.eval()
         torch.save(model.state_dict(), f'{args.ckpt_dir}/pretrain.pt')
@@ -124,7 +127,7 @@ def main():
         # Train 1 epoch (FRESH optimizer each step)
         t0 = time.perf_counter()
         step_opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-        tp, tv = train_one_epoch(model, step_opt, tr_ds, te_ds, device, args.train_batch)
+        tp, tv = train_one_epoch(model, step_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
         ttr = time.perf_counter() - t0
 
         model.eval()

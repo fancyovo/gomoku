@@ -82,11 +82,13 @@ def collate_fn(batch):
     }
 
 
-def evaluate(model, ds, device, batch_size=128):
+def evaluate(model, ds, device, batch_size=128, num_workers=4):
     """Evaluate alphago_zero_loss on a dataset. Returns (policy_loss, value_loss)
     averaged over all VALID (non-padding) tokens."""
     model.eval()
-    dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False,
+                                     collate_fn=collate_fn, num_workers=num_workers,
+                                     pin_memory=True)
     total_samples = 0
     tp_sum, tv_sum = 0.0, 0.0
     with torch.inference_mode():
@@ -114,11 +116,12 @@ def evaluate(model, ds, device, batch_size=128):
     return tp_sum / max(total_samples, 1), tv_sum / max(total_samples, 1)
 
 
-def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128):
+def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128, num_workers=4):
     """Train 1 epoch. Alternating optimization: policy and value each get
     their own backward+step per batch, avoiding gradient scale imbalance."""
     tr_dl = torch.utils.data.DataLoader(train_ds, batch_size=batch_size,
-                                        shuffle=True, collate_fn=collate_fn)
+                                        shuffle=True, collate_fn=collate_fn,
+                                        num_workers=num_workers, pin_memory=True)
     opt.zero_grad()
     model.train()
     for batch in tr_dl:
@@ -170,7 +173,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128):
             fm_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
-    return evaluate(model, test_ds, device, batch_size)
+    return evaluate(model, test_ds, device, batch_size, num_workers)
 
 
 def run_selfplay(model, device, G, M, S):

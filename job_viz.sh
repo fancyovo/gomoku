@@ -10,6 +10,8 @@ set -euo pipefail
 cd /home/scc/pb24511935/gomoku
 source .venv/bin/activate
 
+export OMP_NUM_THREADS=4
+
 echo "=== Building C++ module ==="
 CPLUS_INCLUDE_PATH=/usr/include/python3.12 python setup.py build_ext --inplace 2>&1 | tail -1
 cp build/lib.linux-x86_64-cpython-312/gomoku_cpp*.so .venv/lib/python3.12/site-packages/
