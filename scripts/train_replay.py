@@ -303,11 +303,17 @@ def main():
         return elo
 
     uni = NoisyUniform()
-    pretrain_m = GomokuTransformer(cfg).to(device).eval()
-    pretrain_m.load_state_dict(torch.load(f'{args.ckpt_dir}/pretrain.pt', map_location=device))
+    pretrain_path = f'{args.ckpt_dir}/pretrain.pt'
+    has_pretrain = os.path.exists(pretrain_path)
+    if has_pretrain:
+        pretrain_m = GomokuTransformer(cfg).to(device).eval()
+        pretrain_m.load_state_dict(torch.load(pretrain_path, map_location=device))
 
     ckpts = sorted(glob.glob(os.path.join(args.ckpt_dir, 'step_*.pt')))
-    names = ['noisy_uniform', 'pretrain'] + [os.path.basename(c) for c in ckpts]
+    names = ['noisy_uniform']
+    if has_pretrain:
+        names.append('pretrain')
+    names += [os.path.basename(c) for c in ckpts]
     print(f"Models in ELO: {len(names)}")
     elo_results = []
 
@@ -326,8 +332,9 @@ def main():
             wr = wa / (wa + wb) * 100 if (wa + wb) > 0 else 50.0
             elo_results.append((na, nb, wa + d * 0.5, wb + d * 0.5))
             print(f'{wa}-{wb} WR={wr:.1f}% ({dt:.0f}s)', flush=True)
-            if na not in ('noisy_uniform', 'pretrain'): del ma
-            if nb not in ('noisy_uniform', 'pretrain'): del mb
+            baseline = ('noisy_uniform', 'pretrain')
+            if na not in baseline: del ma
+            if nb not in baseline: del mb
             torch.cuda.empty_cache()
 
     elo = compute_elo(elo_results)

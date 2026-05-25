@@ -21,12 +21,6 @@ class RMSNorm(nn.Module):
 
 
 class KVCacheManager:
-    """Manages per-layer KV caches for a pool of games.
-
-    Each game has its own cache slots identified by pool index.
-    Games at different sequence lengths share the same batch dimension.
-    """
-
     def __init__(self, max_games: int, max_seq_len: int,
                  n_layers: int, n_heads: int, d_head: int, device: torch.device):
         self.max_games = max_games
@@ -48,31 +42,6 @@ class KVCacheManager:
         ]
         self.seq_lens = torch.zeros(max_games, dtype=torch.long, device=device)
 
-    def get_mask(self, indices: torch.Tensor):
-        lens = self.seq_lens[indices]
-        max_len = lens.max().item()
-        if max_len == 0:
-            return None
-        pos = torch.arange(max_len, device=self.device)
-        mask = pos.unsqueeze(0) >= lens.unsqueeze(1)
-        mask = mask.unsqueeze(1).unsqueeze(1)
-        return mask
-
-    def write_kv(self, layer_idx: int, indices: torch.Tensor,
-                 k_new: torch.Tensor, v_new: torch.Tensor):
-        pos = self.seq_lens[indices]
-        self.k[layer_idx][indices, :, pos, :] = k_new.squeeze(2)
-        self.v[layer_idx][indices, :, pos, :] = v_new.squeeze(2)
-
-    def get_kv(self, layer_idx: int, indices: torch.Tensor):
-        lens = self.seq_lens[indices]
-        max_len = lens.max().item()
-        if max_len == 0:
-            return None, None
-        k = self.k[layer_idx][indices, :, :max_len, :]
-        v = self.v[layer_idx][indices, :, :max_len, :]
-        return k, v
-
     def write_and_get_kv(self, layer_idx: int, indices: torch.Tensor,
                          k_new: torch.Tensor, v_new: torch.Tensor):
         lens = self.seq_lens[indices]
@@ -87,9 +56,6 @@ class KVCacheManager:
     def advance(self, indices: torch.Tensor):
         self.seq_lens[indices] += 1
 
-    def reset_game(self, pool_idx: int):
-        self.seq_lens[pool_idx] = 0
-
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float):
@@ -99,7 +65,6 @@ class CausalSelfAttention(nn.Module):
         self.d_head = d_model // n_heads
         self.d_model = d_model
         self.dropout = dropout
-
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.proj = nn.Linear(d_model, d_model, bias=False)
 
@@ -107,113 +72,60 @@ class CausalSelfAttention(nn.Module):
         b, s, d = x.shape
         qkv = self.qkv(x).reshape(b, s, 3, self.n_heads, self.d_head)
         q, k, v = qkv.unbind(dim=2)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=self.dropout if self.training else 0.0,
-        )
+        q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+            dropout_p=self.dropout if self.training else 0.0)
         out = out.transpose(1, 2).reshape(b, s, d)
         return self.proj(out)
 
-    def forward_decode(self, x: torch.Tensor, cache: KVCacheManager,
-                       layer_idx: int, indices: torch.Tensor):
+    def forward_decode(self, x, cache, layer_idx, indices):
         b, s, d = x.shape
         qkv = self.qkv(x).reshape(b, s, 3, self.n_heads, self.d_head)
         q, k_new, v_new = qkv.unbind(dim=2)
-        q = q.transpose(1, 2)
-        k_new = k_new.transpose(1, 2)
-        v_new = v_new.transpose(1, 2)
-
-        k_full, v_full, new_lens = cache.write_and_get_kv(
-            layer_idx, indices, k_new, v_new
-        )
-
+        q = q.transpose(1, 2); k_new = k_new.transpose(1, 2); v_new = v_new.transpose(1, 2)
+        k_full, v_full, new_lens = cache.write_and_get_kv(layer_idx, indices, k_new, v_new)
         max_len = new_lens.max().item()
         pos = torch.arange(max_len, device=x.device)
         mask = pos.unsqueeze(0) >= new_lens.unsqueeze(1)
         mask = mask.unsqueeze(1).unsqueeze(1)
-
-        out = F.scaled_dot_product_attention(
-            q, k_full, v_full,
-            attn_mask=mask,
-            dropout_p=0.0,
-        )
+        out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask, dropout_p=0.0)
         out = out.transpose(1, 2).reshape(b, s, d)
         return self.proj(out)
 
-    def prefill_store(self, x: torch.Tensor, cache: KVCacheManager,
-                      layer_idx: int, indices: torch.Tensor):
+    def prefill_store(self, x, cache, layer_idx, indices):
         b, s, d = x.shape
         qkv = self.qkv(x).reshape(b, s, 3, self.n_heads, self.d_head)
         q, k, v = qkv.unbind(dim=2)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=0.0,
-        )
-
+        q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
         idx_t = torch.as_tensor(indices, device=x.device)
         cache.k[layer_idx][idx_t, :, :s, :] = k
         cache.v[layer_idx][idx_t, :, :s, :] = v
         cache.seq_lens[idx_t] = s
-
         out = out.transpose(1, 2).reshape(b, s, d)
         return self.proj(out)
 
-    def prefill_extend(self, x: torch.Tensor, cache: KVCacheManager,
-                       layer_idx: int, indices: torch.Tensor):
-        """Extend existing KV cache with d new tokens via concatenation (no cache write).
-
-        Builds full K,V by concatenating cached prefix with new tokens.
-        No for-loop, no cache mutation — pure tensor ops.
-        """
-        b, d, _ = x.shape
-        T_old = cache.seq_lens[indices]  # (b,)
+    def prefill_extend(self, x, cache, layer_idx, indices):
+        """Extend existing KV cache with d new tokens via concatenation (no cache write)."""
+        b, d_new, _ = x.shape
+        T_old = cache.seq_lens[indices]
         T_max = T_old.max().item()
-
-        qkv = self.qkv(x).reshape(b, d, 3, self.n_heads, self.d_head)
+        qkv = self.qkv(x).reshape(b, d_new, 3, self.n_heads, self.d_head)
         q, k_new, v_new = qkv.unbind(dim=2)
-        q = q.transpose(1, 2)       # (b, n_heads, d, d_head)
-        k_new = k_new.transpose(1, 2)
-        v_new = v_new.transpose(1, 2)
-
-        # Read cached K,V (positions 0..T_max-1) and concat with new (VECTORIZED)
+        q = q.transpose(1, 2); k_new = k_new.transpose(1, 2); v_new = v_new.transpose(1, 2)
         k_old = cache.k[layer_idx][indices, :, :T_max, :]
         v_old = cache.v[layer_idx][indices, :, :T_max, :]
-        k_full = torch.cat([k_old, k_new], dim=2)  # (b, n_heads, T_max+d, d_head)
+        k_full = torch.cat([k_old, k_new], dim=2)
         v_full = torch.cat([v_old, v_new], dim=2)
-
-        # Build mask (vectorized, no Python loops):
-        # For game b with prefix length T[b], row r (0<=r<d) computes new pos T_max+r.
-        # Valid attention targets:
-        #   col < T[b]                    → valid old positions
-        #   col >= T_max and col-T_max<=r → causal within new block
-        # Masked (stale):
-        #   T[b] <= col < T_max           → stale old cache from other games
-        #   col >= T_max and col-T_max>r  → future new
-        total_len = T_max + d
-        col_idx = torch.arange(total_len, device=x.device).view(1, 1, 1, -1)  # (1,1,1,total)
-        row_r   = torch.arange(d, device=x.device).view(1, 1, -1, 1)          # (1,1,d,1)
-        T_b     = T_old.view(-1, 1, 1, 1)  # (b,1,1,1)
-
-        stale_old  = (col_idx >= T_b) & (col_idx < T_max)   # (b,1,d,total)
-        future_new = (col_idx >= T_max) & (col_idx - T_max > row_r)  # (b,1,d,total)
-        mask = stale_old | future_new  # True = blocked
-
-        out = F.scaled_dot_product_attention(
-            q, k_full, v_full,
-            attn_mask=mask,
-            dropout_p=0.0,
-        )
-        out = out.transpose(1, 2).reshape(b, d, self.d_model)
+        total_len = T_max + d_new
+        col_idx = torch.arange(total_len, device=x.device).view(1, 1, 1, -1)
+        row_r = torch.arange(d_new, device=x.device).view(1, 1, -1, 1)
+        T_b = T_old.view(-1, 1, 1, 1)
+        stale_old = (col_idx >= T_b) & (col_idx < T_max)
+        future_new = (col_idx >= T_max) & (col_idx - T_max > row_r)
+        mask = stale_old | future_new
+        out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask, dropout_p=0.0)
+        out = out.transpose(1, 2).reshape(b, d_new, self.d_model)
         return self.proj(out)
 
 
@@ -224,65 +136,85 @@ class SwiGLUFFN(nn.Module):
         self.up_proj = nn.Linear(d_model, d_ff, bias=False)
         self.down_proj = nn.Linear(d_ff, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor):
-        gate = F.silu(self.gate_proj(x))
-        up = self.up_proj(x)
+    def forward(self, x):
+        gate = F.silu(self.gate_proj(x)); up = self.up_proj(x)
         return self.dropout(self.down_proj(gate * up))
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
+    def __init__(self, d_model, n_heads, d_ff, dropout):
         super().__init__()
         self.norm1 = RMSNorm(d_model)
         self.attn = CausalSelfAttention(d_model, n_heads, dropout)
         self.norm2 = RMSNorm(d_model)
         self.ffn = SwiGLUFFN(d_model, d_ff, dropout)
 
-    def forward(self, x: torch.Tensor):
-        x = x + self.attn(self.norm1(x))
-        x = x + self.ffn(self.norm2(x))
-        return x
+    def forward(self, x):
+        return x + self.ffn(self.norm2(x + self.attn(self.norm1(x))))
 
-    def forward_decode(self, x: torch.Tensor, cache: KVCacheManager,
-                       layer_idx: int, indices: torch.Tensor):
+    def forward_decode(self, x, cache, layer_idx, indices):
         x = x + self.attn.forward_decode(self.norm1(x), cache, layer_idx, indices)
-        x = x + self.ffn(self.norm2(x))
-        return x
+        return x + self.ffn(self.norm2(x))
 
-    def prefill_store(self, x: torch.Tensor, cache: KVCacheManager,
-                      layer_idx: int, indices: torch.Tensor):
+    def prefill_store(self, x, cache, layer_idx, indices):
         x = x + self.attn.prefill_store(self.norm1(x), cache, layer_idx, indices)
-        x = x + self.ffn(self.norm2(x))
-        return x
+        return x + self.ffn(self.norm2(x))
 
-    def prefill_extend(self, x: torch.Tensor, cache: KVCacheManager,
-                       layer_idx: int, indices: torch.Tensor):
+    def prefill_extend(self, x, cache, layer_idx, indices):
         x = x + self.attn.prefill_extend(self.norm1(x), cache, layer_idx, indices)
-        x = x + self.ffn(self.norm2(x))
-        return x
+        return x + self.ffn(self.norm2(x))
 
 
 class GomokuTransformer(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.embedding = ActionEmbedding(config.n_positions, config.d_model)
-        self.layers = nn.ModuleList([
+        n_shared = getattr(config, 'n_shared', 4)
+        n_policy = getattr(config, 'n_policy', 4)
+        n_value = getattr(config, 'n_value', 4)
+
+        self.has_policy = n_policy > 0
+        self.has_value = n_value > 0
+
+        self.embedding = ActionEmbedding(config.n_positions, config.d_model, config.board_size)
+
+        # Shared backbone
+        self.shared_layers = nn.ModuleList([
             TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
-            for _ in range(config.n_layers)
+            for _ in range(n_shared)
         ])
-        self.norm_f = RMSNorm(config.d_model)
-        self.policy_head = nn.Linear(config.d_model, config.n_positions, bias=False)
-        self.value_head = nn.Sequential(
-            nn.Linear(config.d_model, config.value_head_dim, bias=False),
-            nn.ReLU(),
-            nn.Linear(config.value_head_dim, 1, bias=False),
-            nn.Tanh(),
-        )
+
+        # Policy branch
+        if self.has_policy:
+            self.policy_layers = nn.ModuleList([
+                TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
+                for _ in range(n_policy)
+            ])
+            self.policy_norm = RMSNorm(config.d_model)
+            self.policy_head = nn.Linear(config.d_model, config.n_positions, bias=False)
+        else:
+            self.policy_layers = nn.ModuleList()
+            self.policy_norm = None
+            self.policy_head = None
+
+        # Value branch
+        if self.has_value:
+            self.value_layers = nn.ModuleList([
+                TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
+                for _ in range(n_value)
+            ])
+            self.value_norm = RMSNorm(config.d_model)
+            self.value_head = nn.Sequential(
+                nn.Linear(config.d_model, config.value_head_dim, bias=False),
+                nn.ReLU(),
+                nn.Linear(config.value_head_dim, 2, bias=False),
+            )
+        else:
+            self.value_layers = nn.ModuleList()
+            self.value_norm = None
+            self.value_head = None
 
         self.first_move_logits = nn.Parameter(torch.zeros(config.n_positions))
-
         self._init_weights()
 
     def _init_weights(self):
@@ -294,137 +226,159 @@ class GomokuTransformer(nn.Module):
             elif isinstance(module, nn.Embedding):
                 torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, positions: torch.Tensor, players: torch.Tensor):
-        x = self.embedding(positions, players)
-        for layer in self.layers:
+    @staticmethod
+    def _value_to_scalar(value_logits):
+        probs = torch.softmax(value_logits.float(), dim=-1)
+        return probs[..., 0] - probs[..., 1]
+
+    # ── Branch layer helpers (no cache, causal attention) ──
+    def _forward_branch(self, layers: nn.ModuleList, x: torch.Tensor):
+        for layer in layers:
             x = layer(x)
-        x = self.norm_f(x)
-        policy = self.policy_head(x)
-        value = self.value_head(x).squeeze(-1)
+        return x
+
+    def _forward_branch_decode(self, layers: nn.ModuleList, x: torch.Tensor):
+        """Single-token decode for branch: attention is trivial (1 token)."""
+        for layer in layers:
+            h = layer.norm1(x)
+            qkv = layer.attn.qkv(h).reshape(h.shape[0], 1, 3, layer.attn.n_heads, layer.attn.d_head)
+            q, k, v = qkv.unbind(dim=2)
+            q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
+            out = out.transpose(1, 2).reshape(h.shape[0], 1, layer.attn.d_model)
+            x = x + layer.attn.proj(out)
+            x = x + layer.ffn(layer.norm2(x))
+        return x
+
+    # ── Public API ──
+    def forward(self, positions, players):
+        x = self.embedding(positions, players)
+        for layer in self.shared_layers:
+            x = layer(x)
+
+        policy = None; value = None
+        if self.has_policy:
+            xp = self._forward_branch(self.policy_layers, x)
+            xp = self.policy_norm(xp)
+            policy = self.policy_head(xp)
+        if self.has_value:
+            xv = self._forward_branch(self.value_layers, x)
+            xv = self.value_norm(xv)
+            value = self.value_head(xv)
         return policy, value
 
     @torch.inference_mode()
-    def get_logits(self, positions: torch.Tensor, players: torch.Tensor):
+    def get_logits(self, positions, players):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             policy, _ = self.forward(positions, players)
         return policy[:, -1, :].float()
 
     @torch.inference_mode()
-    def sample_first_moves(self, batch_size: int, device: torch.device):
+    def sample_first_moves(self, batch_size, device):
         probs = torch.softmax(self.first_move_logits, dim=-1)
         return torch.multinomial(probs.unsqueeze(0).expand(batch_size, -1),
                                  num_samples=1).squeeze(-1)
 
-    @torch.inference_mode()
-    def sample_actions(self, positions: torch.Tensor, players: torch.Tensor):
-        logits = self.get_logits(positions, players)
-        probs = torch.softmax(logits, dim=-1)
-        return torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-    def create_cache(self, max_games: int, max_cache_len: int | None = None) -> KVCacheManager:
+    def create_cache(self, max_games, max_cache_len=None):
         if max_cache_len is None:
             max_cache_len = self.config.max_seq_len
+        n_shared = len(self.shared_layers)
+        if n_shared == 0:
+            return None  # no shared layers, no KV cache needed
         return KVCacheManager(
-            max_games=max_games,
-            max_seq_len=max_cache_len,
-            n_layers=self.config.n_layers,
+            max_games=max_games, max_seq_len=max_cache_len,
+            n_layers=n_shared,
             n_heads=self.config.n_heads,
             d_head=self.config.d_model // self.config.n_heads,
             device=next(self.parameters()).device,
         )
 
+    def _run_shared(self, x, cache, indices, mode='extend'):
+        for i, layer in enumerate(self.shared_layers):
+            if cache is not None:
+                if mode == 'store':
+                    x = layer.prefill_store(x, cache, i, indices)
+                elif mode == 'decode':
+                    x = layer.forward_decode(x, cache, i, indices)
+                else:  # extend
+                    x = layer.prefill_extend(x, cache, i, indices)
+            else:
+                x = layer(x)
+        return x
+
     @torch.inference_mode()
-    def prefill(self, positions: torch.Tensor, players: torch.Tensor,
-                cache: KVCacheManager, indices: list[int]):
-        """Prefill: process initial sequences, populate KV cache, return policy+value."""
+    def prefill(self, positions, players, cache, indices):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             x = self.embedding(positions, players)
-            for i, layer in enumerate(self.layers):
-                x = layer.prefill_store(x, cache, i, indices)
-            x = self.norm_f(x)
-            policy = self.policy_head(x)
-            value = self.value_head(x).squeeze(-1)
+            x = self._run_shared(x, cache, indices, 'store')
+
+            policy = None; value = None
+            if self.has_policy:
+                xp = self._forward_branch(self.policy_layers, x)
+                xp = self.policy_norm(xp)
+                policy = self.policy_head(xp)
+            if self.has_value:
+                xv = self._forward_branch(self.value_layers, x)
+                xv = self.value_norm(xv)
+                value = self.value_head(xv)
+
         last_idx = torch.tensor([p.shape[0] - 1 for p in positions], device=x.device)
-        return (policy[torch.arange(len(indices)), last_idx].float(),
-                value[torch.arange(len(indices)), last_idx].float())
+        p_out = policy[torch.arange(len(indices)), last_idx].float() if policy is not None else None
+        v_out = self._value_to_scalar(value[torch.arange(len(indices)), last_idx]) if value is not None else None
+        return p_out, v_out
 
     @torch.inference_mode()
-    def decode(self, positions: torch.Tensor, players: torch.Tensor,
-               cache: KVCacheManager, indices: torch.Tensor):
-        """Decode one token per game using KV cache. Returns (policy_logits, values)."""
+    def decode(self, positions, players, cache, indices):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            pos_t = positions.unsqueeze(1)
-            plr_t = players.unsqueeze(1)
-            offset = cache.seq_lens[indices]
+            pos_t = positions.unsqueeze(1); plr_t = players.unsqueeze(1)
+            offset = cache.seq_lens[indices] if cache is not None else None
             x = self.embedding(pos_t, plr_t, seq_offset=offset)
-            for i, layer in enumerate(self.layers):
-                x = layer.forward_decode(x, cache, i, indices)
-            x = self.norm_f(x)
-            policy = self.policy_head(x)
-            value = self.value_head(x).squeeze(-1).squeeze(-1)
-        cache.advance(indices)
-        return policy.squeeze(1).float(), value.float()
+            x = self._run_shared(x, cache, indices, 'decode')
+
+            policy = None; value = None
+            if self.has_policy:
+                xp = self._forward_branch_decode(self.policy_layers, x)
+                xp = self.policy_norm(xp)
+                policy = self.policy_head(xp)
+            if self.has_value:
+                xv = self._forward_branch_decode(self.value_layers, x)
+                xv = self.value_norm(xv)
+                value = self.value_head(xv)
+
+        if cache is not None:
+            cache.advance(indices)
+        p_out = policy.squeeze(1).float() if policy is not None else None
+        v_out = self._value_to_scalar(value.squeeze(1)) if value is not None else None
+        return p_out, v_out
 
     @torch.inference_mode()
-    def prefill_extend(self, positions: torch.Tensor, players: torch.Tensor,
-                       cache: KVCacheManager, indices: torch.Tensor):
-        """Extend KV cache with d new tokens (MCTS path). seq_lens unchanged.
-
-        Args:
-            positions: (b, d) — new tokens to add
-            players:   (b, d) — player ids
-            cache:     KV cache with seq_lens = game length T
-            indices:   (b,) — pool indices
-
-        Returns:
-            policy: (b, d, n_positions) — policy logits at each of the d positions
-            value:  (b, d) — value at each of the d positions
-        """
-        # Validate at function boundary
-        assert positions.max().item() < self.config.n_positions, \
-            f"prefill_extend: position OOB max={positions.max().item()}, n_pos={self.config.n_positions}"
-        assert positions.min().item() >= 0, \
-            f"prefill_extend: negative position min={positions.min().item()}"
-
+    def prefill_extend(self, positions, players, cache, indices):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            offset = cache.seq_lens[indices]  # (b,) — game length T
+            offset = cache.seq_lens[indices] if cache is not None else None
             x = self.embedding(positions, players, seq_offset=offset)
-            for i, layer in enumerate(self.layers):
-                x = layer.prefill_extend(x, cache, i, indices)
-            x = self.norm_f(x)
-            policy = self.policy_head(x)       # (b, d, n_positions)
-            value = self.value_head(x).squeeze(-1)  # (b, d)
-        return policy.float(), value.float()
+            x = self._run_shared(x, cache, indices, 'extend')
+
+            policy = None; value = None
+            if self.has_policy:
+                xp = self._forward_branch(self.policy_layers, x)
+                xp = self.policy_norm(xp)
+                policy = self.policy_head(xp)
+            if self.has_value:
+                xv = self._forward_branch(self.value_layers, x)
+                xv = self.value_norm(xv)
+                value = self.value_head(xv)
+
+        p_out = policy.float() if policy is not None else None
+        v_out = self._value_to_scalar(value) if value is not None else None
+        return p_out, v_out
 
     @torch.inference_mode()
-    def evaluate_mcts_leaves(self, positions: torch.Tensor, players: torch.Tensor,
-                             cache: KVCacheManager, indices: torch.Tensor,
-                             path_lengths: torch.Tensor):
-        """Batch-evaluate MCTS leaf nodes via KV cache extension.
-
-        Args:
-            positions:    (b, d_max) — padded new tokens (root-to-leaf path)
-            players:      (b, d_max)
-            cache:        root KV cache with seq_lens = game length T (unchanged)
-            indices:      (b,)
-            path_lengths: (b,) — actual path length d_i per game (1-indexed)
-
-        Returns:
-            policy_logits: (b, n_positions) at leaf position
-            values:        (b,) at leaf position
-        """
+    def evaluate_mcts_leaves(self, positions, players, cache, indices, path_lengths):
         policy, value = self.prefill_extend(positions, players, cache, indices)
-        leaf_idx = (path_lengths - 1).clamp(min=0)  # (b,)
-        leaf_policy = policy[torch.arange(len(indices)), leaf_idx]
-        leaf_value = value[torch.arange(len(indices)), leaf_idx]
-        # Value is from the player encoded at the leaf position (plr_dense[j]).
-        # C++ expand_roots stores it directly as root.V (root player's perspective).
-        # C++ expand_and_backup flips sign at each backup step:
-        #   v = values[li]; then v = -v for each ancestor edge
-        # So the value starts from leaf player's perspective and flips to parent's
-        # perspective at each level. No Python-side flip needed.
+        leaf_idx = (path_lengths - 1).clamp(min=0)
+        leaf_policy = policy[torch.arange(len(indices)), leaf_idx] if policy is not None else None
+        leaf_value = value[torch.arange(len(indices)), leaf_idx] if value is not None else None
         return leaf_policy, leaf_value
 
     def load_state_dict(self, state_dict, strict=False):
-        """Load with backward compat for old single-head checkpoints."""
         return super().load_state_dict(state_dict, strict=strict)

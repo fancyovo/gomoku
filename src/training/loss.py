@@ -63,12 +63,10 @@ def alphago_zero_loss(
     value_targets: torch.Tensor,
     mask: torch.Tensor | None = None,
     value_weights: torch.Tensor | None = None,
+    policy_weight: float = 1.0,
+    value_weight: float = 1.0,
 ):
-    """AlphaGo Zero loss with classification value head.
-
-    Policy: cross-entropy of model policy vs MCTS visit distribution (225 classes).
-    Value: cross-entropy of 2-class softmax vs soft targets [p_win, p_lose].
-    Total = policy_CE + value_CE (both naturally normalized by 1/ln(n_classes)).
+    """AlphaGo Zero loss. Set pw=0 or vw=0 for alternating optimizer steps.
 
     Args:
         policy_logits:  (N, n_positions) — model policy head outputs (logits)
@@ -112,5 +110,5 @@ def alphago_zero_loss(
         value_loss = value_ce_per_sample.mean()
     value_loss = value_loss / (math.log(n_value) if n_value > 1 else 1.0)
 
-    loss = policy_loss + value_loss
+    loss = policy_loss * policy_weight + value_loss * value_weight
     return loss, policy_loss.detach(), value_loss.detach()
