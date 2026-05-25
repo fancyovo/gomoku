@@ -272,6 +272,8 @@ def main():
     parser.add_argument('--G', type=int, default=256)
     parser.add_argument('--M', type=int, default=4)
     parser.add_argument('--S', type=int, default=16)
+    parser.add_argument('--max_gap', type=int, default=5,
+                        help='Only evaluate pairs with |i-j| <= max_gap (plus noisy_uniform)')
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
 
@@ -383,12 +385,11 @@ def main():
             model_i_mcts = load_model(ckpt_name)
             model_i_policy = load_model(ckpt_name)
 
-            # Build list of opponents: step_{i-1}, step_{i-2}, ..., step_0, noisy_uniform
-            opponents = [uni_name]  # noisy_uniform last
-            for j in range(step_i - 1, -1, -1):
-                opponents.insert(0, f"step_{j:06d}.pt")
-
-            # Also include any older checkpoints that exist
+            # Sparse opponents: noisy_uniform + steps within max_gap
+            opponents = [uni_name]
+            for j in range(step_i - 1, max(step_i - 1 - args.max_gap, -1), -1):
+                if j >= 0:
+                    opponents.insert(0, f"step_{j:06d}.pt")
             existing_opponents = [o for o in opponents if o == uni_name or o in ckpt_names]
 
             for opp_name in existing_opponents:

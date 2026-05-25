@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=Students
 #SBATCH --gres=gpu:1
+#SBATCH --nodelist=anode07
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00
@@ -20,4 +21,4 @@ echo "=== Continuous ELO monitor: checkpoints/run200 ==="
 python -u scripts/elo_monitor_continuous.py \
     --ckpt_dir checkpoints/run200 \
     --G 256 --M 4 --S 16 \
-    --interval 30
+    --max_gap 5 --interval 30
