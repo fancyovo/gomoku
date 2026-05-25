@@ -127,30 +127,36 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128):
         pt = batch['mcts_policies'].to(device)
         vt = batch['value_targets'].to(device)
         m = batch['mask'].to(device)
+        if pos.shape[1] <= 1:
+            continue
+        pm = m[:, :-1].contiguous().reshape(-1)
+        if pm.sum() == 0:
+            continue
+
+        # Policy step: forward + backward with params before value update
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             p, v = model(pos, plr)
-        if pos.shape[1] > 1:
-            pp = p[:, :-1].contiguous()
-            vv = v[:, :-1].contiguous()
-            tp_ = pt[:, :-1].contiguous()
-            tv_ = vt[:, :-1].contiguous()
-            pm = m[:, :-1].contiguous()
-            # Policy-only step (retain_graph so value can also backward)
-            loss_p, _, _ = alphago_zero_loss(
-                pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
-                vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-                pm.reshape(-1), policy_weight=1.0, value_weight=0.0)
-            loss_p.backward(retain_graph=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step(); opt.zero_grad()
-            # Value-only step
-            loss_v, _, _ = alphago_zero_loss(
-                pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
-                vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-                pm.reshape(-1), policy_weight=0.0, value_weight=1.0)
-            loss_v.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step(); opt.zero_grad()
+        pp = p[:, :-1].contiguous(); vv = v[:, :-1].contiguous()
+        tp_ = pt[:, :-1].contiguous(); tv_ = vt[:, :-1].contiguous()
+        loss_p, _, _ = alphago_zero_loss(
+            pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
+            vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
+            pm, policy_weight=1.0, value_weight=0.0)
+        loss_p.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step(); opt.zero_grad()
+
+        # Value step: fresh forward with updated params
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            p2, v2 = model(pos, plr)
+        pp2 = p2[:, :-1].contiguous(); vv2 = v2[:, :-1].contiguous()
+        loss_v, _, _ = alphago_zero_loss(
+            pp2.reshape(-1, 225).float(), tp_.reshape(-1, 225),
+            vv2.reshape(-1, 2).float(), tv_.reshape(-1, 2),
+            pm, policy_weight=0.0, value_weight=1.0)
+        loss_v.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step(); opt.zero_grad()
     return evaluate(model, test_ds, device, batch_size)
 
 
