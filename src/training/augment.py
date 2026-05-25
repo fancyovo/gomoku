@@ -36,6 +36,9 @@ def _build_sym_table():
 
 SYM_TABLE = _build_sym_table()  # (8, 225)
 
+# Inverse symmetry tables: SYM_TABLE[s][old] = new → INV_SYM_TABLE[s][new] = old
+INV_SYM_TABLE = torch.stack([torch.argsort(s) for s in SYM_TABLE])  # (8, 225)
+
 
 def augment_trajectory(traj: dict, n_syms: int = N_SYMS) -> list[dict]:
     """Apply symmetry augmentations to one trajectory.

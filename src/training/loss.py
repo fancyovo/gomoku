@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 
@@ -58,35 +59,58 @@ def reinforce_loss(
 def alphago_zero_loss(
     policy_logits: torch.Tensor,
     mcts_targets: torch.Tensor,
-    value_preds: torch.Tensor,
+    value_logits: torch.Tensor,
     value_targets: torch.Tensor,
     mask: torch.Tensor | None = None,
-    value_weight: float = 1.0,
+    value_weights: torch.Tensor | None = None,
 ):
-    """AlphaGo Zero loss: cross-entropy on policy + MSE on value.
+    """AlphaGo Zero loss with classification value head.
+
+    Policy: cross-entropy of model policy vs MCTS visit distribution (225 classes).
+    Value: cross-entropy of 2-class softmax vs soft targets [p_win, p_lose].
+    Total = policy_CE + value_CE (both naturally normalized by 1/ln(n_classes)).
 
     Args:
         policy_logits:  (N, n_positions) — model policy head outputs (logits)
         mcts_targets:   (N, n_positions) — MCTS visit count distribution (target)
-        value_preds:    (N,) — model value head outputs (tanh, -1..1)
-        value_targets:  (N,) — game outcome from current player's perspective (+1/-1/0)
+        value_logits:   (N, 2) — model value head raw logits [win, lose]
+        value_targets:  (N, 2) — soft targets: [1,0]=win, [0,1]=lose, [.5,.5]=draw
         mask:           (N,) — True for valid positions
-        value_weight:   float — weight for value loss relative to policy loss
+        value_weights:  (N,) — per-sample weight for value loss (e.g. decay by dist to end)
     """
     if mask is not None:
         policy_logits = policy_logits[mask]
         mcts_targets = mcts_targets[mask]
-        value_preds = value_preds[mask]
+        value_logits = value_logits[mask]
         value_targets = value_targets[mask]
+        if value_weights is not None:
+            value_weights = value_weights[mask]
 
-    if len(value_targets) == 0:
+    if mask is None or mask.sum() == 0:
         return (torch.tensor(0.0, device=policy_logits.device),
                 torch.tensor(0.0, device=policy_logits.device),
                 torch.tensor(0.0, device=policy_logits.device))
 
-    log_probs = F.log_softmax(policy_logits, dim=-1)
-    policy_loss = -(mcts_targets * log_probs).sum(dim=-1).mean()
-    value_loss = F.mse_loss(value_preds, value_targets)
+    # Policy: CE over n_policy classes, scaled by 1/ln(n_policy)
+    n_policy = policy_logits.size(-1)  # 225
+    policy_log_probs = F.log_softmax(policy_logits, dim=-1)
+    policy_ce_per_sample = -(mcts_targets * policy_log_probs).sum(dim=-1)  # (N,)
+    if value_weights is not None:
+        W = value_weights.sum()
+        policy_loss = (policy_ce_per_sample * value_weights).sum() / W
+    else:
+        policy_loss = policy_ce_per_sample.mean()
+    policy_loss = policy_loss / (math.log(n_policy) if n_policy > 1 else 1.0)
 
-    loss = policy_loss + value_weight * value_loss
+    # Value: CE over n_value classes, scaled by 1/ln(n_value)
+    n_value = value_logits.size(-1)  # 2
+    value_log_probs = F.log_softmax(value_logits.float(), dim=-1)
+    value_ce_per_sample = -(value_targets * value_log_probs).sum(dim=-1)  # (N,)
+    if value_weights is not None:
+        value_loss = (value_ce_per_sample * value_weights).sum() / W
+    else:
+        value_loss = value_ce_per_sample.mean()
+    value_loss = value_loss / (math.log(n_value) if n_value > 1 else 1.0)
+
+    loss = policy_loss + value_loss
     return loss, policy_loss.detach(), value_loss.detach()
