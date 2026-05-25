@@ -1,1 +1,0 @@
-{"batch_size": 512, "num_simulations": 256, "leaves_per_game": 4, "black_wins": 269, "white_wins": 243, "draws": 0, "avg_length": 58.123046875, "time_seconds": 261.07195895724}

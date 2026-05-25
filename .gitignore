@@ -16,6 +16,9 @@ wandb_key
 .ssh_key
 .ssh_key.pub
 
+# Data (large binary files)
+data/
+
 # Checkpoints (large files)
 checkpoints/
 *.pt
