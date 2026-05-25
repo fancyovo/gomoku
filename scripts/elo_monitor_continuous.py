@@ -303,18 +303,23 @@ def main():
         return m
 
     def get_pair_key(a, b):
-        sa = int(a.split('_')[1].split('.')[0]) if a.startswith('step_') else -1
-        sb = int(b.split('_')[1].split('.')[0]) if b.startswith('step_') else -1
-        s1, s2 = (sa, sb) if sa <= sb else (sb, sa)
-        return f"{s1}_{s2}"
+        """Key that preserves original call order: a was ma, b was mb."""
+        return f"{a}|{b}"
 
     def eval_pair(ma, mb, a_name, b_name, cache_key, match_type):
         """Evaluate one pair, update cache if not already done."""
         pair_key = get_pair_key(a_name, b_name)
+        # Also check reverse key (same pair, opposite order)
+        rev_key = get_pair_key(b_name, a_name)
         if cache[cache_key].get(pair_key) is not None:
             val = cache[cache_key][pair_key]
             if len(val) >= 4 and val[3] == G_ELO:
-                return val[0], val[1], val[2]  # cached
+                return val[0], val[1], val[2]
+        if cache[cache_key].get(rev_key) is not None:
+            val = cache[cache_key][rev_key]
+            if len(val) >= 4 and val[3] == G_ELO:
+                # Reverse: wa was for b_name, wb was for a_name
+                return val[1], val[0], val[2]
 
         if match_type == 'mcts':
             wa, wb, d = play_match_mcts(ma, mb)
@@ -322,7 +327,6 @@ def main():
             wa, wb, d = play_match_policy(ma, mb)
 
         cache[cache_key][pair_key] = [wa, wb, d, G_ELO]
-        # Save cache after each match
         with open(CACHE_FILE, 'w') as f:
             json.dump(cache, f)
         return wa, wb, d
@@ -336,9 +340,7 @@ def main():
                 continue
             wa, wb, d = val[0], val[1], val[2]
             try:
-                s1, s2 = key.split('_')
-                a = uni_name if s1 == '-1' else f"step_{int(s1):06d}.pt"
-                b = uni_name if s2 == '-1' else f"step_{int(s2):06d}.pt"
+                a, b = key.split('|')
                 results.append((a, b, wa + d * 0.5, wb + d * 0.5))
             except (ValueError, IndexError):
                 pass
