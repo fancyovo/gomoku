@@ -135,12 +135,12 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128):
             tp_ = pt[:, :-1].contiguous()
             tv_ = vt[:, :-1].contiguous()
             pm = m[:, :-1].contiguous()
-            # Policy-only step
+            # Policy-only step (retain_graph so value can also backward)
             loss_p, _, _ = alphago_zero_loss(
                 pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
                 vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
                 pm.reshape(-1), policy_weight=1.0, value_weight=0.0)
-            loss_p.backward()
+            loss_p.backward(retain_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
             # Value-only step
