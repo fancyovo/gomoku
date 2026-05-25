@@ -12,6 +12,9 @@ Usage: python scripts/train_replay.py [--ckpt_dir DIR] [--data_dir DIR]
 import argparse, os, sys, time, glob, random
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from model import ModelConfig, GomokuTransformer
@@ -93,6 +96,7 @@ def main():
 
     # ── Self-play steps ──
     t_start = time.perf_counter()
+    game_lens = []
     for step in range(args.n_steps):
         print(f"\n{'=' * 60}")
         print(f"Step {step}/{args.n_steps - 1}")
@@ -134,6 +138,16 @@ def main():
         torch.save(model.state_dict(), f'{args.ckpt_dir}/step_{step:06d}.pt')
         print(f"  Train: test_p={tp:.4f} test_v={tv:.4f} "
               f"aug={taug:.0f}s tr={ttr:.0f}s")
+
+        # Track and plot game length
+        game_lens.append(avg_len)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(range(len(game_lens)), game_lens, '.-', markersize=6)
+        ax.set_xlabel('Step'); ax.set_ylabel('Avg Game Length')
+        ax.set_title('Self-Play Game Length per Step')
+        ax.grid(True, alpha=0.3)
+        plt.savefig(f'{args.ckpt_dir}/game_length.png', dpi=80, bbox_inches='tight')
+        plt.close()
 
     dt_total = time.perf_counter() - t_start
     print(f"\nTraining done: {dt_total / 60:.0f}min")
