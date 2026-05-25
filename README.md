@@ -50,8 +50,8 @@ python scripts/eval_elo_curve.py --ckpt_dir checkpoints/run1
 | Experiment | Steps | Peak ELO | Notes |
 |------------|-------|----------|-------|
 | pretrain10 | pretrain + 10 | 1802 (step_2) | Old buggy pretrain data, best single model |
-| scratch5 | 5 (from scratch) | 1795 (step_4) | No pretrain, replay buffer only |
-| scratch15 | 15 (from scratch) | ~1800 (step_2-4) | Oscillating after peak |
+| scratch5 | 5 (from scratch) | 1795 (step_4) | No pretrain, consistent improvement |
+| scratch15 | 15 (from scratch) | 1741 (step_11) | ΔELO=+626, step_0 below noisy_uniform |
 | G=2048 | pretrain + 14 | 1729 (step_11) | Training unstable, step_14 collapse |
 
 ## Known Issues
