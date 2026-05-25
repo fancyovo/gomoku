@@ -231,14 +231,28 @@ class GomokuTransformer(nn.Module):
         probs = torch.softmax(value_logits.float(), dim=-1)
         return probs[..., 0] - probs[..., 1]
 
-    # ── Branch layer helpers (no cache, causal attention) ──
+    # ── Branch layer helpers (position-wise, no cross-position attention) ──
+    # Branch layers process each position independently with single-token
+    # self-attention, consistent between training and decode. The shared
+    # layers already aggregate cross-position information via KV cache.
     def _forward_branch(self, layers: nn.ModuleList, x: torch.Tensor):
+        B, S, D = x.shape
+        x = x.reshape(B * S, 1, D)
         for layer in layers:
-            x = layer(x)
-        return x
+            h = layer.norm1(x)
+            qkv = layer.attn.qkv(h).reshape(B * S, 1, 3, layer.attn.n_heads, layer.attn.d_head)
+            q, k, v = qkv.unbind(dim=2)
+            q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+            dropout_p = layer.attn.dropout if self.training else 0.0
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
+            out = out.transpose(1, 2).reshape(B * S, 1, layer.attn.d_model)
+            x = x + layer.attn.proj(out)
+            x = x + layer.ffn(layer.norm2(x))
+        return x.reshape(B, S, D)
 
     def _forward_branch_decode(self, layers: nn.ModuleList, x: torch.Tensor):
-        """Single-token decode for branch: attention is trivial (1 token)."""
+        """Single-token decode for branch: same per-position logic as _forward_branch.
+        Input x has shape (B, 1, D)."""
         for layer in layers:
             h = layer.norm1(x)
             qkv = layer.attn.qkv(h).reshape(h.shape[0], 1, 3, layer.attn.n_heads, layer.attn.d_head)

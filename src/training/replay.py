@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from model import ModelConfig, GomokuTransformer
 from training.augment import SYM_TABLE, N_SYMS, INV_SYM_TABLE
-from training.loss import alphago_zero_loss
+from training.loss import alphago_zero_loss, reinforce_loss
 import gomoku_cpp
 
 
@@ -157,6 +157,19 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128):
         loss_v.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); opt.zero_grad()
+
+        # First-move training: REINFORCE with game outcome as reward.
+        # first_move_logits is a learned prior over opening moves.
+        first_mask = m[:, 0]
+        if first_mask.any():
+            fm_logits = model.first_move_logits.unsqueeze(0).expand(pos.shape[0], -1)
+            first_reward = vt[:, 0, 0] - vt[:, 0, 1]  # +1=win, -1=lose, 0=draw
+            fm_loss, _, _ = reinforce_loss(
+                fm_logits.float(), pos[:, 0], first_reward, first_mask,
+                entropy_coef=0.01, loss_scale=1.0)
+            fm_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); opt.zero_grad()
     return evaluate(model, test_ds, device, batch_size)
 
 
