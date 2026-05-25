@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
-import imageio
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from model import ModelConfig, GomokuTransformer
@@ -203,5 +203,7 @@ for i, a in enumerate(ph[best_g]):
 
 plt.close()
 
-imageio.mimsave(OUT_GIF, frames, duration=0.5, loop=0)
+pil_frames = [Image.fromarray(f) for f in frames]
+pil_frames[0].save(OUT_GIF, save_all=True, append_images=pil_frames[1:],
+                   duration=500, loop=0)
 print(f"Saved: {OUT_GIF} ({len(frames)} frames)")
