@@ -67,9 +67,9 @@ def main():
 
     if args.from_scratch:
         print("\nStarting from scratch (random init, no pretrain).")
-        print(f"  Using {len(all_data)} games as initial pool.")
         pool_rng = random.Random(123)
         pool = pool_rng.sample(all_data, min(pool_size, len(all_data)))
+        print(f"  Using {len(pool)} games as initial pool (sampled from {len(all_data)} available).")
     else:
         # ── Pretrain on ENTIRE dataset (1 epoch) ──
         print("\nPretraining on full dataset (1 epoch)...")
