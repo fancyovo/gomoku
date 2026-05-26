@@ -21,4 +21,4 @@ echo "=== Continuous ELO monitor: checkpoints/run200 ==="
 python -u scripts/elo_monitor_continuous.py \
     --ckpt_dir checkpoints/run200 \
     --G 256 --M 4 --S 16 \
-    --max_gap 5 --interval 30
+    --max_gap 8 --interval 30

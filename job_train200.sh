@@ -19,7 +19,7 @@ cp build/lib.linux-x86_64-cpython-312/gomoku_cpp*.so .venv/lib/python3.12/site-p
 
 echo "=== Training 200 steps from scratch (lr=1e-4) ==="
 python -u scripts/train_replay.py \
-    --G 512 --M 8 --S 64 --n_steps 200 \
+    --G 512 --M 8 --S 128 --n_steps 200 \
     --ckpt_dir checkpoints/run200 \
     --data_dir data/init_pool \
     --from_scratch \
