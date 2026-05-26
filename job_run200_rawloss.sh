@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=Students
 #SBATCH --gres=gpu:1
+#SBATCH --exclude=anode05
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00
