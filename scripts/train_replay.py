@@ -47,6 +47,8 @@ def main():
     parser.add_argument('--n_shared', type=int, default=4)
     parser.add_argument('--n_policy', type=int, default=4)
     parser.add_argument('--n_value', type=int, default=4)
+    parser.add_argument('--single_loss', action='store_true',
+                        help='Use combined policy+value loss (one backward per batch)')
     args = parser.parse_args()
 
     torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
@@ -89,7 +91,7 @@ def main():
         tr_ds = GameDataset(tr_aug)
         te_ds = GameDataset(te_aug)
 
-        tp, tv = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
+        tp, tv, _, _ = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
         print(f"  Pretrain done: test_p={tp:.4f} test_v={tv:.4f}")
         model.eval()
         torch.save(model.state_dict(), f'{args.ckpt_dir}/pretrain.pt')
@@ -99,8 +101,39 @@ def main():
         print(f"  Initial pool: {len(pool)} games (not trained on)")
 
     # ── Self-play steps ──
+    import csv as _csv
     t_start = time.perf_counter()
-    game_lens = []
+    game_lens = []; test_ps = []; test_vs = []; train_ps = []; train_vs = []
+
+    def _plot_losses(step_idx):
+        """Plot game length + policy/value loss curves."""
+        n = len(game_lens)
+        xs = list(range(n))
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        axes[0].plot(xs, game_lens, '.-', markersize=4)
+        axes[0].set_title('Avg Game Length'); axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(xs, test_ps, '.-', label='test_p', markersize=4)
+        axes[1].plot(xs, train_ps, '.-', label='train_p', markersize=4)
+        axes[1].set_title('Policy Loss (norm CE)'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(xs, test_vs, '.-', label='test_v', markersize=4)
+        axes[2].plot(xs, train_vs, '.-', label='train_v', markersize=4)
+        axes[2].set_title('Value Loss (norm CE)'); axes[2].legend(); axes[2].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(f'{args.ckpt_dir}/training_curves.png', dpi=100, bbox_inches='tight')
+        plt.close()
+
+        # CSV export
+        with open(f'{args.ckpt_dir}/training_log.csv', 'w', newline='') as f:
+            w = _csv.writer(f)
+            w.writerow(['step', 'avg_len', 'test_p', 'test_v', 'train_p', 'train_v'])
+            for i in range(n):
+                w.writerow([i, game_lens[i], test_ps[i], test_vs[i], train_ps[i], train_vs[i]])
+
     for step in range(args.n_steps):
         print(f"\n{'=' * 60}")
         print(f"Step {step}/{args.n_steps - 1}")
@@ -114,12 +147,12 @@ def main():
         print(f"  Self-play: G={len(new_traj)} len={avg_len:.0f} "
               f"B={bw} W={ww} D={dr} ({tsp:.0f}s)")
 
-        # Update pool: discard G random games, add G new games
+        # Update pool
         pool_rng.shuffle(pool)
         pool = pool[args.G:] + new_traj
         print(f"  Pool: {len(pool)} games")
 
-        # Train/test split (before augmentation)
+        # Train/test split
         pool_rng.shuffle(pool)
         n_tr = int(len(pool) * 0.8)
         tr_pool = pool[:n_tr]
@@ -132,26 +165,24 @@ def main():
         te_ds = GameDataset(te_aug)
         taug = time.perf_counter() - t0
 
-        # Train 1 epoch (FRESH optimizer each step)
+        # Train 1 epoch
         t0 = time.perf_counter()
         step_opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-        tp, tv = train_one_epoch(model, step_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
+        tp, tv, tr_p_loss, tr_v_loss = train_one_epoch(
+            model, step_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers,
+            single_loss=args.single_loss)
         ttr = time.perf_counter() - t0
 
         model.eval()
         torch.save(model.state_dict(), f'{args.ckpt_dir}/step_{step:06d}.pt')
         print(f"  Train: test_p={tp:.4f} test_v={tv:.4f} "
+              f"train_p={tr_p_loss:.4f} train_v={tr_v_loss:.4f} "
               f"aug={taug:.0f}s tr={ttr:.0f}s")
 
-        # Track and plot game length
-        game_lens.append(avg_len)
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(range(len(game_lens)), game_lens, '.-', markersize=6)
-        ax.set_xlabel('Step'); ax.set_ylabel('Avg Game Length')
-        ax.set_title('Self-Play Game Length per Step')
-        ax.grid(True, alpha=0.3)
-        plt.savefig(f'{args.ckpt_dir}/game_length.png', dpi=80, bbox_inches='tight')
-        plt.close()
+        # Track
+        game_lens.append(avg_len); test_ps.append(tp); test_vs.append(tv)
+        train_ps.append(tr_p_loss); train_vs.append(tr_v_loss)
+        _plot_losses(step)
 
     dt_total = time.perf_counter() - t_start
     print(f"\nTraining done: {dt_total / 60:.0f}min")

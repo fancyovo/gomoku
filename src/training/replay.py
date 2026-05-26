@@ -116,14 +116,16 @@ def evaluate(model, ds, device, batch_size=128, num_workers=4):
     return tp_sum / max(total_samples, 1), tv_sum / max(total_samples, 1)
 
 
-def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128, num_workers=4):
-    """Train 1 epoch. Alternating optimization: policy and value each get
-    their own backward+step per batch, avoiding gradient scale imbalance."""
+def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
+                    num_workers=4, single_loss=False):
+    """Train 1 epoch. If single_loss, one forward+backward with combined loss.
+    Otherwise alternating optimization (policy step then value step)."""
     tr_dl = torch.utils.data.DataLoader(train_ds, batch_size=batch_size,
                                         shuffle=True, collate_fn=collate_fn,
                                         num_workers=num_workers, pin_memory=True)
     opt.zero_grad()
     model.train()
+    total_p_loss = 0.0; total_v_loss = 0.0; n_batches = 0
     for batch in tr_dl:
         pos = batch['positions'].to(device)
         plr = batch['players'].to(device)
@@ -136,44 +138,64 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128, num_w
         if pm.sum() == 0:
             continue
 
-        # Policy step: forward + backward with params before value update
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            p, v = model(pos, plr)
-        pp = p[:, :-1].contiguous(); vv = v[:, :-1].contiguous()
-        tp_ = pt[:, :-1].contiguous(); tv_ = vt[:, :-1].contiguous()
-        loss_p, _, _ = alphago_zero_loss(
-            pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
-            vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-            pm, policy_weight=1.0, value_weight=0.0)
-        loss_p.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step(); opt.zero_grad()
+        if single_loss:
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                p, v = model(pos, plr)
+            pp = p[:, :-1].contiguous(); vv = v[:, :-1].contiguous()
+            tp_ = pt[:, :-1].contiguous(); tv_ = vt[:, :-1].contiguous()
+            loss, pl, vl = alphago_zero_loss(
+                pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
+                vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
+                pm, policy_weight=1.0, value_weight=1.0)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); opt.zero_grad()
+            total_p_loss += pl.item(); total_v_loss += vl.item()
+            n_batches += 1
+        else:
+            # Alternating: policy step then value step
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                p, v = model(pos, plr)
+            pp = p[:, :-1].contiguous(); vv = v[:, :-1].contiguous()
+            tp_ = pt[:, :-1].contiguous(); tv_ = vt[:, :-1].contiguous()
+            loss_p, _, _ = alphago_zero_loss(
+                pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
+                vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
+                pm, policy_weight=1.0, value_weight=0.0)
+            loss_p.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); opt.zero_grad()
 
-        # Value step: fresh forward with updated params
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            p2, v2 = model(pos, plr)
-        pp2 = p2[:, :-1].contiguous(); vv2 = v2[:, :-1].contiguous()
-        loss_v, _, _ = alphago_zero_loss(
-            pp2.reshape(-1, 225).float(), tp_.reshape(-1, 225),
-            vv2.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-            pm, policy_weight=0.0, value_weight=1.0)
-        loss_v.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step(); opt.zero_grad()
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                p2, v2 = model(pos, plr)
+            pp2 = p2[:, :-1].contiguous(); vv2 = v2[:, :-1].contiguous()
+            loss_v, _, _ = alphago_zero_loss(
+                pp2.reshape(-1, 225).float(), tp_.reshape(-1, 225),
+                vv2.reshape(-1, 2).float(), tv_.reshape(-1, 2),
+                pm, policy_weight=0.0, value_weight=1.0)
+            loss_v.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); opt.zero_grad()
+            total_p_loss += loss_p.item(); total_v_loss += loss_v.item()
+            n_batches += 2
 
-        # First-move training: REINFORCE with game outcome as reward.
-        # first_move_logits is a learned prior over opening moves.
+        # First-move training
         first_mask = m[:, 0]
         if first_mask.any():
             fm_logits = model.first_move_logits.unsqueeze(0).expand(pos.shape[0], -1)
-            first_reward = vt[:, 0, 0] - vt[:, 0, 1]  # +1=win, -1=lose, 0=draw
+            first_reward = vt[:, 0, 0] - vt[:, 0, 1]
             fm_loss, _, _ = reinforce_loss(
                 fm_logits.float(), pos[:, 0], first_reward, first_mask,
                 entropy_coef=0.01, loss_scale=1.0)
             fm_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
-    return evaluate(model, test_ds, device, batch_size, num_workers)
+            total_p_loss += fm_loss.item(); n_batches += 1
+
+    test_p, test_v = evaluate(model, test_ds, device, batch_size, num_workers)
+    train_p_loss = total_p_loss / max(n_batches, 1)
+    train_v_loss = total_v_loss / max(n_batches, 1)
+    return test_p, test_v, train_p_loss, train_v_loss
 
 
 def run_selfplay(model, device, G, M, S):
