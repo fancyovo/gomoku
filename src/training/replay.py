@@ -125,7 +125,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
                                         num_workers=num_workers, pin_memory=True)
     opt.zero_grad()
     model.train()
-    total_p_loss = 0.0; total_v_loss = 0.0; n_batches = 0
+    total_p_loss = 0.0; total_v_loss = 0.0; n_p = 0; n_v = 0
     for batch in tr_dl:
         pos = batch['positions'].to(device)
         plr = batch['players'].to(device)
@@ -151,7 +151,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
             total_p_loss += pl.item(); total_v_loss += vl.item()
-            n_batches += 1
+            n_p += 1; n_v += 1
         else:
             # Alternating: policy step then value step
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -177,7 +177,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
             total_p_loss += loss_p.item(); total_v_loss += loss_v.item()
-            n_batches += 2
+            n_p += 1; n_v += 1
 
         # First-move training
         first_mask = m[:, 0]
@@ -190,11 +190,11 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             fm_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
-            total_p_loss += fm_loss.item(); n_batches += 1
+            total_p_loss += fm_loss.item(); n_p += 1
 
     test_p, test_v = evaluate(model, test_ds, device, batch_size, num_workers)
-    train_p_loss = total_p_loss / max(n_batches, 1)
-    train_v_loss = total_v_loss / max(n_batches, 1)
+    train_p_loss = total_p_loss / max(n_p, 1)
+    train_v_loss = total_v_loss / max(n_v, 1)
     return test_p, test_v, train_p_loss, train_v_loss
 
 
