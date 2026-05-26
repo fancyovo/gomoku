@@ -190,7 +190,6 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             fm_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
-            total_p_loss += fm_loss.item(); n_p += 1
 
     test_p, test_v = evaluate(model, test_ds, device, batch_size, num_workers)
     train_p_loss = total_p_loss / max(n_p, 1)
