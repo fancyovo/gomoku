@@ -16,6 +16,12 @@
 Project memory is stored in `MEMORY.md` (index) + `memory/` directory (entries).
 Read these first when starting a new session.
 
+## CRITICAL: Never Overwrite Past Experiments
+- Every new experiment MUST use a NEW checkpoint directory (e.g., `checkpoints/run200_S128/`)
+- NEVER `rm -rf checkpoints/` or delete any previous experiment's model weights or plots
+- Checkpoint directories are permanent records — treat them as read-only after the experiment finishes
+- Use descriptive directory names with key hyperparameters (e.g., `run200_S128_lr1e4_pool8`)
+
 ## Common Operations
 ```bash
 # Training (from scratch, 10 steps)

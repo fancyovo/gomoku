@@ -17,14 +17,13 @@ echo "=== Building C++ module ==="
 CPLUS_INCLUDE_PATH=/usr/include/python3.12 python setup.py build_ext --inplace 2>&1 | tail -1
 cp build/lib.linux-x86_64-cpython-312/gomoku_cpp*.so .venv/lib/python3.12/site-packages/
 
-# Clean old run
-rm -rf checkpoints/run200
-mkdir -p checkpoints/run200 slurm_logs
+CKPT_DIR="checkpoints/run200_S128_$(date +%m%d_%H%M)"
+mkdir -p "$CKPT_DIR" slurm_logs
 
 echo "=== Launching training (S=128) in background ==="
 python -u scripts/train_replay.py \
     --G 512 --M 8 --S 128 --n_steps 200 \
-    --ckpt_dir checkpoints/run200 \
+    --ckpt_dir "$CKPT_DIR" \
     --data_dir data/init_pool \
     --from_scratch \
     --lr 1e-4 \
@@ -34,7 +33,7 @@ TRAIN_PID=$!
 
 echo "=== Launching monitor (max_gap=8) in background ==="
 python -u scripts/elo_monitor_continuous.py \
-    --ckpt_dir checkpoints/run200 \
+    --ckpt_dir "$CKPT_DIR" \
     --G 256 --M 4 --S 16 \
     --max_gap 8 --interval 30 \
     > slurm_logs/monitor_$$.log 2>&1 &
