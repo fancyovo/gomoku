@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--n_value', type=int, default=4)
     parser.add_argument('--single_loss', action='store_true',
                         help='Use combined policy+value loss (one backward per batch)')
+    parser.add_argument('--raw_loss', action='store_true',
+                        help='Use raw CE (no ln(N) normalization) so policy and value contribute equally')
     args = parser.parse_args()
 
     torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
@@ -91,7 +93,7 @@ def main():
         tr_ds = GameDataset(tr_aug)
         te_ds = GameDataset(te_aug)
 
-        tp, tv, _, _ = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers)
+        tp, tv, _, _ = train_one_epoch(model, pretrain_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers, normalize_loss=not args.raw_loss)
         print(f"  Pretrain done: test_p={tp:.4f} test_v={tv:.4f}")
         model.eval()
         torch.save(model.state_dict(), f'{args.ckpt_dir}/pretrain.pt')
@@ -170,7 +172,7 @@ def main():
         step_opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
         tp, tv, tr_p_loss, tr_v_loss = train_one_epoch(
             model, step_opt, tr_ds, te_ds, device, args.train_batch, args.num_workers,
-            single_loss=args.single_loss)
+            single_loss=args.single_loss, normalize_loss=not args.raw_loss)
         ttr = time.perf_counter() - t0
 
         model.eval()

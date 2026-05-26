@@ -82,7 +82,7 @@ def collate_fn(batch):
     }
 
 
-def evaluate(model, ds, device, batch_size=128, num_workers=4):
+def evaluate(model, ds, device, batch_size=128, num_workers=4, normalize_loss=True):
     """Evaluate alphago_zero_loss on a dataset. Returns (policy_loss, value_loss)
     averaged over all VALID (non-padding) tokens."""
     model.eval()
@@ -109,7 +109,8 @@ def evaluate(model, ds, device, batch_size=128, num_workers=4):
                 n_valid = pm.sum().item()
                 _, pl, vl = alphago_zero_loss(
                     pp.reshape(-1, 225), tp_.reshape(-1, 225),
-                    vv.reshape(-1, 2), tv_.reshape(-1, 2), pm.reshape(-1))
+                    vv.reshape(-1, 2), tv_.reshape(-1, 2), pm.reshape(-1),
+                    normalize=normalize_loss)
                 tp_sum += pl.item() * n_valid
                 tv_sum += vl.item() * n_valid
                 total_samples += n_valid
@@ -117,7 +118,7 @@ def evaluate(model, ds, device, batch_size=128, num_workers=4):
 
 
 def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
-                    num_workers=4, single_loss=False):
+                    num_workers=4, single_loss=False, normalize_loss=True):
     """Train 1 epoch. If single_loss, one forward+backward with combined loss.
     Otherwise alternating optimization (policy step then value step)."""
     tr_dl = torch.utils.data.DataLoader(train_ds, batch_size=batch_size,
@@ -146,7 +147,8 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             loss, pl, vl = alphago_zero_loss(
                 pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
                 vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-                pm, policy_weight=1.0, value_weight=1.0)
+                pm, policy_weight=1.0, value_weight=1.0,
+                normalize=normalize_loss)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
@@ -161,7 +163,8 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             loss_p, _, _ = alphago_zero_loss(
                 pp.reshape(-1, 225).float(), tp_.reshape(-1, 225),
                 vv.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-                pm, policy_weight=1.0, value_weight=0.0)
+                pm, policy_weight=1.0, value_weight=0.0,
+                normalize=normalize_loss)
             loss_p.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
@@ -172,7 +175,8 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             loss_v, _, _ = alphago_zero_loss(
                 pp2.reshape(-1, 225).float(), tp_.reshape(-1, 225),
                 vv2.reshape(-1, 2).float(), tv_.reshape(-1, 2),
-                pm, policy_weight=0.0, value_weight=1.0)
+                pm, policy_weight=0.0, value_weight=1.0,
+                normalize=normalize_loss)
             loss_v.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
@@ -191,7 +195,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
 
-    test_p, test_v = evaluate(model, test_ds, device, batch_size, num_workers)
+    test_p, test_v = evaluate(model, test_ds, device, batch_size, num_workers, normalize_loss)
     train_p_loss = total_p_loss / max(n_p, 1)
     train_v_loss = total_v_loss / max(n_v, 1)
     return test_p, test_v, train_p_loss, train_v_loss

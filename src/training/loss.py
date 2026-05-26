@@ -65,6 +65,7 @@ def alphago_zero_loss(
     value_weights: torch.Tensor | None = None,
     policy_weight: float = 1.0,
     value_weight: float = 1.0,
+    normalize: bool = True,
 ):
     """AlphaGo Zero loss. Set pw=0 or vw=0 for alternating optimizer steps.
 
@@ -89,7 +90,7 @@ def alphago_zero_loss(
                 torch.tensor(0.0, device=policy_logits.device),
                 torch.tensor(0.0, device=policy_logits.device))
 
-    # Policy: CE over n_policy classes, scaled by 1/ln(n_policy)
+    # Policy: CE over n_policy classes
     n_policy = policy_logits.size(-1)  # 225
     policy_log_probs = F.log_softmax(policy_logits, dim=-1)
     policy_ce_per_sample = -(mcts_targets * policy_log_probs).sum(dim=-1)  # (N,)
@@ -98,9 +99,10 @@ def alphago_zero_loss(
         policy_loss = (policy_ce_per_sample * value_weights).sum() / W
     else:
         policy_loss = policy_ce_per_sample.mean()
-    policy_loss = policy_loss / (math.log(n_policy) if n_policy > 1 else 1.0)
+    if normalize:
+        policy_loss = policy_loss / (math.log(n_policy) if n_policy > 1 else 1.0)
 
-    # Value: CE over n_value classes, scaled by 1/ln(n_value)
+    # Value: CE over n_value classes
     n_value = value_logits.size(-1)  # 2
     value_log_probs = F.log_softmax(value_logits.float(), dim=-1)
     value_ce_per_sample = -(value_targets * value_log_probs).sum(dim=-1)  # (N,)
@@ -108,7 +110,8 @@ def alphago_zero_loss(
         value_loss = (value_ce_per_sample * value_weights).sum() / W
     else:
         value_loss = value_ce_per_sample.mean()
-    value_loss = value_loss / (math.log(n_value) if n_value > 1 else 1.0)
+    if normalize:
+        value_loss = value_loss / (math.log(n_value) if n_value > 1 else 1.0)
 
     loss = policy_loss * policy_weight + value_loss * value_weight
     return loss, policy_loss.detach(), value_loss.detach()
