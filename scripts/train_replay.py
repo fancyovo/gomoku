@@ -44,12 +44,16 @@ def main():
                         help='Start from random model, no pretraining')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='DataLoader worker processes')
+    parser.add_argument('--n_shared', type=int, default=4)
+    parser.add_argument('--n_policy', type=int, default=4)
+    parser.add_argument('--n_value', type=int, default=4)
     args = parser.parse_args()
 
     torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
     os.makedirs(args.ckpt_dir, exist_ok=True)
     device = torch.device('cuda')
-    cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15)
+    cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15,
+                      n_shared=args.n_shared, n_policy=args.n_policy, n_value=args.n_value)
     pool_size = args.pool_mult * args.G
 
     print(f"Replay Buffer Training")

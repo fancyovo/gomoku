@@ -275,6 +275,9 @@ def main():
     parser.add_argument('--max_gap', type=int, default=5,
                         help='Only evaluate pairs with |i-j| <= max_gap (plus noisy_uniform)')
     parser.add_argument('--interval', type=int, default=30)
+    parser.add_argument('--n_shared', type=int, default=4)
+    parser.add_argument('--n_policy', type=int, default=4)
+    parser.add_argument('--n_value', type=int, default=4)
     args = parser.parse_args()
 
     global G_ELO, M_ELO, S_ELO, DEVICE, CACHE_FILE
@@ -282,7 +285,8 @@ def main():
     DEVICE = torch.device("cuda")
     CACHE_FILE = os.path.join(args.ckpt_dir, "elo_monitor_cache.json")
 
-    cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15)
+    cfg = ModelConfig(d_model=128, n_layers=16, n_heads=4, d_ff=256, board_size=15,
+                      n_shared=args.n_shared, n_policy=args.n_policy, n_value=args.n_value)
     uni = NoisyUniform(cfg=cfg)
     uni_name = 'noisy_uniform'
 

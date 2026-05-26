@@ -12,6 +12,9 @@ class ModelConfig:
     max_seq_len: int = 512
     board_size: int = 15
     value_head_dim: int = 64
+    n_shared: int = 4
+    n_policy: int = 4
+    n_value: int = 4
 
     @property
     def n_positions(self) -> int:
