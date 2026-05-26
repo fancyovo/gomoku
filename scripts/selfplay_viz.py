@@ -175,10 +175,11 @@ for g in range(N_GAMES):
     for i in range(0, len(moves_str), 15):
         print("  " + " ".join(moves_str[i:i + 15]))
 
-# ── Pick the shortest game for GIF ──────────────────────────────
-best_g = min(range(N_GAMES), key=lambda g: plen[g])
-L = plen[best_g]
-print(f"\nRendering GIF: Game {best_g + 1} ({L} moves) -> {OUT_GIF}")
+# ── Pick a random game for GIF ─────────────────────────────────
+import random as _random
+chosen_g = _random.randrange(N_GAMES)
+L = plen[chosen_g]
+print(f"\nRendering GIF: Game {chosen_g + 1} ({L} moves) -> {OUT_GIF}")
 
 b0 = np.zeros(N_CELLS, dtype=bool)
 b1 = np.zeros(N_CELLS, dtype=bool)
@@ -188,10 +189,10 @@ fig, ax = plt.subplots(figsize=(6, 6))
 draw_board(ax, b0, b1, move_num=0)
 fig.tight_layout()
 fig.canvas.draw()
-frames.append(np.asarray(fig.canvas.buffer_rgba()))
+frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
 
-for i, a in enumerate(ph[best_g]):
-    plr = plh[best_g][i]
+for i, a in enumerate(ph[chosen_g]):
+    plr = plh[chosen_g][i]
     if plr == 0:
         b0[a] = True
     else:
@@ -199,7 +200,7 @@ for i, a in enumerate(ph[best_g]):
     draw_board(ax, b0, b1, last_move=a, move_num=i + 1)
     fig.tight_layout()
     fig.canvas.draw()
-    frames.append(np.asarray(fig.canvas.buffer_rgba()))
+    frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
 
 plt.close()
 

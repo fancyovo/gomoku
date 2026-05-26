@@ -375,9 +375,9 @@ def main():
         # Find checkpoints not yet evaluated
         pending = [n for n in ckpt_names if n not in evaluated]
         if pending:
-            # Sort by step number, process newest first
+            # Sort by step number, process smallest first
             pending.sort(key=lambda n: int(n.split('_')[1].split('.')[0]))
-            ckpt_name = pending[-1]  # newest un-evaluated
+            ckpt_name = pending[0]  # smallest un-evaluated
             step_i = int(ckpt_name.split('_')[1].split('.')[0])
             print(f"\n[{time.strftime('%H:%M:%S')}] New checkpoint: {ckpt_name}")
 
@@ -385,11 +385,14 @@ def main():
             model_i_mcts = load_model(ckpt_name)
             model_i_policy = load_model(ckpt_name)
 
-            # Sparse opponents: noisy_uniform + steps within max_gap
-            opponents = [uni_name]
+            # Sparse opponents: previous steps within max_gap (higher → lower)
+            opponents = []
             for j in range(step_i - 1, max(step_i - 1 - args.max_gap, -1), -1):
                 if j >= 0:
                     opponents.insert(0, f"step_{j:06d}.pt")
+            # noisy_uniform only vs steps 0..4 (treated as step -1)
+            if step_i <= 4:
+                opponents.append(uni_name)
             existing_opponents = [o for o in opponents if o == uni_name or o in ckpt_names]
 
             for opp_name in existing_opponents:
