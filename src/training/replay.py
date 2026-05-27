@@ -220,7 +220,7 @@ def run_selfplay(model, device, G, M, S):
     fa = model.sample_first_moves(G, device)
     model.prefill(fa.unsqueeze(1),
                   torch.zeros(G, 1, dtype=torch.long, device=device),
-                  kv, list(range(G)))
+                  kv, _br_kv, list(range(G)))
 
     ph = [[] for _ in range(G)]
     plh = [[] for _ in range(G)]
