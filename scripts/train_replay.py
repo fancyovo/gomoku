@@ -51,6 +51,8 @@ def main():
                         help='Use combined policy+value loss (one backward per batch)')
     parser.add_argument('--raw_loss', action='store_true',
                         help='Use raw CE (no ln(N) normalization) so policy and value contribute equally')
+    parser.add_argument('--train_fraction', type=float, default=1.0,
+                        help='Fraction of training data to use per step (subsampled randomly)')
     args = parser.parse_args()
 
     torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
@@ -163,6 +165,10 @@ def main():
         t0 = time.perf_counter()
         tr_aug = augment_trajectories(tr_pool)
         te_aug = augment_trajectories(te_pool)
+        if args.train_fraction < 1.0:
+            n_tr_aug = int(len(tr_aug) * args.train_fraction)
+            random.shuffle(tr_aug)
+            tr_aug = tr_aug[:n_tr_aug]
         tr_ds = GameDataset(tr_aug)
         te_ds = GameDataset(te_aug)
         taug = time.perf_counter() - t0

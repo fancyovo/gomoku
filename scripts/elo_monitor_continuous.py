@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Continuous ELO monitor: watches for new checkpoints, evaluates against previous ones.
 
-- Full MCTS matches AND policy-only matches
+- Full MCTS matches, policy-only matches, AND value-only matches
 - Reverse order: step_i vs step_{i-1}, step_{i-2}, ..., noisy_uniform
+- 3 separate ELO curves
 - Separate ELO curves for full and policy-only
 - Replots after each checkpoint is fully evaluated
 """
@@ -43,6 +44,25 @@ class NoisyUniform:
     def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
+
+
+class ValueOnlyModel:
+    """Wraps a trained model: uniform policy + model value head."""
+    def __init__(self, model, device):
+        self.model = model; self.device = device; self.config = model.config
+    def create_cache(self, max_games, max_cache_len=250):
+        return self.model.create_cache(max_games, max_cache_len)
+    def sample_first_moves(self, bs, dev):
+        return torch.randint(0, 225, (bs,), device=dev)
+    def prefill(self, pos, plr, cache, indices):
+        _, v = self.model.prefill(pos, plr, cache, indices)
+        return torch.zeros(pos.shape[0], 225, device=self.device), v
+    def decode(self, pos, plr, cache, indices):
+        _, v = self.model.decode(pos, plr, cache, indices)
+        return torch.zeros(len(indices), 225, device=self.device), v
+    def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
+        _, v = self.model.evaluate_mcts_leaves(pos, plr, cache, indices, plen)
+        return torch.zeros(pos.shape[0], 225, device=self.device), v
 
 
 # ── Full MCTS match ────────────────────────────────────────────
@@ -295,7 +315,7 @@ def main():
         with open(CACHE_FILE) as f:
             cache = json.load(f)
     else:
-        cache = {"mcts": {}, "policy": {}}
+        cache = {"mcts": {}, "policy": {}, "value": {}}
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
@@ -327,7 +347,7 @@ def main():
                 # Reverse: wa was for b_name, wb was for a_name
                 return val[1], val[0], val[2]
 
-        if match_type == 'mcts':
+        if match_type in ('mcts', 'value'):
             wa, wb, d = play_match_mcts(ma, mb)
         else:
             wa, wb, d = play_match_policy(ma, mb)
@@ -339,7 +359,7 @@ def main():
 
     def build_results(match_type):
         """Build results list from cache for ELO computation."""
-        cache_key = 'mcts' if match_type == 'mcts' else 'policy'
+        cache_key = match_type
         results = []
         for key, val in cache[cache_key].items():
             if len(val) < 4 or val[3] != G_ELO:
@@ -356,7 +376,8 @@ def main():
         """Recompute ELO from all results and plot both curves."""
         for match_type, suffix, title in [
             ('mcts', 'mcts', 'MCTS'),
-            ('policy', 'policy', 'Policy-only')
+            ('policy', 'policy', 'Policy-only'),
+            ('value', 'value', 'Value-only'),
         ]:
             results = build_results(match_type)
             if results:
@@ -385,9 +406,11 @@ def main():
             step_i = int(ckpt_name.split('_')[1].split('.')[0])
             print(f"\n[{time.strftime('%H:%M:%S')}] New checkpoint: {ckpt_name}")
 
-            # Load model once
-            model_i_mcts = load_model(ckpt_name)
-            model_i_policy = load_model(ckpt_name)
+            # Load model once (separate wrappers for each eval type)
+            raw_model = load_model(ckpt_name)
+            model_i_mcts = raw_model
+            model_i_policy = raw_model
+            model_i_value = ValueOnlyModel(raw_model, DEVICE)
 
             # Sparse opponents: previous steps within max_gap (higher → lower)
             opponents = []
@@ -436,7 +459,26 @@ def main():
                     del opp_model
                 torch.cuda.empty_cache()
 
-            del model_i_mcts, model_i_policy
+            # Value-only matches
+            for opp_name in existing_opponents:
+                print(f'  Value: {ckpt_name} vs {opp_name} ...', end=' ', flush=True)
+                t0 = time.perf_counter()
+
+                if opp_name == uni_name:
+                    opp_model = uni
+                else:
+                    opp_model = ValueOnlyModel(load_model(opp_name), DEVICE)
+
+                wa, wb, d = eval_pair(model_i_value, opp_model, ckpt_name, opp_name, 'value', 'value')
+                dt = time.perf_counter() - t0
+                wr = wa / (wa + wb) * 100 if (wa + wb) > 0 else 50.0
+                print(f'{wa}-{wb} WR={wr:.1f}% ({dt:.0f}s)')
+
+                if opp_name != uni_name:
+                    del opp_model
+                torch.cuda.empty_cache()
+
+            del raw_model, model_i_value
             torch.cuda.empty_cache()
 
             evaluated.add(ckpt_name)
