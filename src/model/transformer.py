@@ -244,7 +244,7 @@ class GomokuTransformer(nn.Module):
             q, k, v = qkv.unbind(dim=2)
             q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
             dropout_p = layer.attn.dropout if self.training else 0.0
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=dropout_p)
             out = out.transpose(1, 2).reshape(B * S, 1, layer.attn.d_model)
             x = x + layer.attn.proj(out)
             x = x + layer.ffn(layer.norm2(x))
@@ -258,7 +258,7 @@ class GomokuTransformer(nn.Module):
             qkv = layer.attn.qkv(h).reshape(h.shape[0], 1, 3, layer.attn.n_heads, layer.attn.d_head)
             q, k, v = qkv.unbind(dim=2)
             q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=0.0)
             out = out.transpose(1, 2).reshape(h.shape[0], 1, layer.attn.d_model)
             x = x + layer.attn.proj(out)
             x = x + layer.ffn(layer.norm2(x))
