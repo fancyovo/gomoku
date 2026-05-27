@@ -68,13 +68,13 @@ class BranchCache:
         """Store shared outputs from prefill (multiple positions per game)."""
         for i, idx in enumerate(indices):
             L = hidden[i].shape[0]
-            self.h[idx, :L] = hidden[i]
+            self.h[idx, :L] = hidden[i].to(self.h.dtype)
             self.lens[idx] = L
 
     def store_decode(self, indices: torch.Tensor, x: torch.Tensor):
         """Store single new shared output from decode step."""
         lens = self.lens[indices]
-        self.h[indices, lens] = x.squeeze(1)
+        self.h[indices, lens] = x.squeeze(1).to(self.h.dtype)
         self.lens[indices] += 1
 
     def get_full_sequence(self, indices: torch.Tensor):
