@@ -34,14 +34,14 @@ class NoisyUniform:
         return m.create_cache(max_games, max_cache_len)
     def sample_first_moves(self, bs, dev):
         return torch.randint(0, 225, (bs,), device=dev)
-    def prefill(self, pos, plr, cache, indices):
+    def prefill(self, pos, plr, kv_cache, branch_cache, indices):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
-    def decode(self, pos, plr, cache, indices):
-        cache.advance(indices)
+    def decode(self, pos, plr, kv_cache, branch_cache, indices):
+        kv_cache.advance(indices)
         return (torch.randn(len(indices), 225, device=DEVICE) * 0.02,
                 torch.zeros(len(indices), device=DEVICE))
-    def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
 
@@ -54,14 +54,14 @@ class ValueOnlyModel:
         return self.model.create_cache(max_games, max_cache_len)
     def sample_first_moves(self, bs, dev):
         return torch.randint(0, 225, (bs,), device=dev)
-    def prefill(self, pos, plr, cache, indices):
-        _, v = self.model.prefill(pos, plr, cache, indices)
+    def prefill(self, pos, plr, kv_cache, branch_cache, indices):
+        _, v = self.model.prefill(pos, plr, kv_cache, branch_cache, indices)
         return torch.zeros(pos.shape[0], 225, device=self.device), v
-    def decode(self, pos, plr, cache, indices):
-        _, v = self.model.decode(pos, plr, cache, indices)
+    def decode(self, pos, plr, kv_cache, branch_cache, indices):
+        _, v = self.model.decode(pos, plr, kv_cache, branch_cache, indices)
         return torch.zeros(len(indices), 225, device=self.device), v
-    def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
-        _, v = self.model.evaluate_mcts_leaves(pos, plr, cache, indices, plen)
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
+        _, v = self.model.evaluate_mcts_leaves(pos, plr, kv_cache, indices, plen)
         return torch.zeros(pos.shape[0], 225, device=self.device), v
 
 
@@ -80,7 +80,7 @@ def play_match_mcts(ma, mb):
         return m
 
     mga = mm(); mgb = mm()
-    kva = ma.create_cache(max_games=G_); kvb = mb.create_cache(max_games=G_)
+    kva, _br_kva = ma.create_cache(max_games=G_); kvb, _br_kvb = mb.create_cache(max_games=G_)
     ab = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
     fin = np.zeros(G_, dtype=bool); res = np.zeros(G_, dtype=np.int32)
     p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
@@ -94,8 +94,8 @@ def play_match_mcts(ma, mb):
 
     fat = torch.tensor(fa, dtype=torch.long, device=DEVICE).unsqueeze(1)
     pl0 = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    ma.prefill(fat, pl0, kva, list(range(G_)))
-    mb.prefill(fat, pl0, kvb, list(range(G_)))
+    ma.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+    mb.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
     og = torch.from_numpy(p0 | p1).to(DEVICE)
 
     for g in range(G_):
@@ -150,8 +150,8 @@ def play_match_mcts(ma, mb):
             else: p1[g, a] = True; og[g, a] = True
         dp_ = torch.from_numpy(na).to(DEVICE)
         dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=DEVICE)
-        ma.decode(dp_, dpl_, kva, torch.from_numpy(act).to(DEVICE))
-        mb.decode(dp_, dpl_, kvb, torch.from_numpy(act).to(DEVICE))
+        ma.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(DEVICE))
+        mb.decode(dp_, dpl_, kvb, _br_kvb, torch.from_numpy(act).to(DEVICE))
         for i, g in enumerate(act):
             r = gomoku_cpp.step(pool, g, int(na[i]))
             if r: fin[g] = True; res[g] = r
@@ -179,7 +179,7 @@ def play_match_policy(ma, mb):
     G_ = G_ELO
     pool = gomoku_cpp.GamePool(G_); pool.reset_all()
 
-    kva = ma.create_cache(max_games=G_); kvb = mb.create_cache(max_games=G_)
+    kva, _br_kva = ma.create_cache(max_games=G_); kvb, _br_kvb = mb.create_cache(max_games=G_)
     a_black = torch.tensor([i % 2 == 0 for i in range(G_)], device=DEVICE)
     finished = torch.zeros(G_, dtype=torch.bool)
     winners = torch.zeros(G_, dtype=torch.long)
@@ -193,8 +193,8 @@ def play_match_policy(ma, mb):
 
     fat = first.unsqueeze(1)
     pl0 = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    ma.prefill(fat, pl0, kva, list(range(G_)))
-    mb.prefill(fat, pl0, kvb, list(range(G_)))
+    ma.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+    mb.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
 
     for g in range(G_):
         r = gomoku_cpp.step(pool, g, int(first[g].item()))
@@ -208,8 +208,8 @@ def play_match_policy(ma, mb):
         if len(act) == 0: break
         cp = move % 2
 
-        logits_a, _ = ma.decode(last_act, last_plr, kva, idx)
-        logits_b, _ = mb.decode(last_act, last_plr, kvb, idx)
+        logits_a, _ = ma.decode(last_act, last_plr, kva, _br_kva, idx)
+        logits_b, _ = mb.decode(last_act, last_plr, kvb, _br_kvb, idx)
 
         logits = torch.where(a_black.unsqueeze(1) if cp == 0 else (~a_black).unsqueeze(1),
                             logits_a, logits_b)

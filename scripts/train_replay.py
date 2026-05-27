@@ -218,12 +218,12 @@ def main():
         def sample_first_moves(self, bs, dev):
             return torch.randint(0, 225, (bs,), device=dev)
 
-        def prefill(self, pos, plr, cache, indices):
+        def prefill(self, pos, plr, kv_cache, branch_cache, indices):
             return (torch.randn(pos.shape[0], 225, device=device) * self.ns,
                     torch.zeros(pos.shape[0], device=device))
 
-        def decode(self, pos, plr, cache, indices):
-            cache.advance(indices)
+        def decode(self, pos, plr, kv_cache, branch_cache, indices):
+            kv_cache.advance(indices)
             return (torch.randn(len(indices), 225, device=device) * self.ns,
                     torch.zeros(len(indices), device=device))
 
@@ -246,8 +246,8 @@ def main():
             return m
 
         mga = mm(); mgb = mm()
-        kva = model_a.create_cache(max_games=G_)
-        kvb = model_b.create_cache(max_games=G_)
+        kva, _br_kva = model_a.create_cache(max_games=G_)
+        kvb, _br_kvb = model_b.create_cache(max_games=G_)
         ab = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
         fin = np.zeros(G_, dtype=bool)
         res = np.zeros(G_, dtype=np.int32)
@@ -263,8 +263,8 @@ def main():
 
         fat = torch.tensor(fa, dtype=torch.long, device=device).unsqueeze(1)
         pl0 = torch.zeros(G_, 1, dtype=torch.long, device=device)
-        model_a.prefill(fat, pl0, kva, list(range(G_)))
-        model_b.prefill(fat, pl0, kvb, list(range(G_)))
+        model_a.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+        model_b.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
         og = torch.from_numpy(p0 | p1).to(device)
 
         for g in range(G_):
@@ -323,8 +323,8 @@ def main():
                     p1[g, a] = True; og[g, a] = True
             dp_ = torch.from_numpy(na).to(device)
             dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=device)
-            model_a.decode(dp_, dpl_, kva, torch.from_numpy(act).to(device))
-            model_b.decode(dp_, dpl_, kvb, torch.from_numpy(act).to(device))
+            model_a.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(device))
+            model_b.decode(dp_, dpl_, kvb, _br_kvb, torch.from_numpy(act).to(device))
             for i, g in enumerate(act):
                 r = gomoku_cpp.step(pool, g, int(na[i]))
                 if r:

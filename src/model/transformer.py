@@ -57,6 +57,33 @@ class KVCacheManager:
         self.seq_lens[indices] += 1
 
 
+class BranchCache:
+    """Stores shared-layer hidden states per game so branch layers can do
+    full cross-position attention during decode. Memory: max_games * seq_len * d_model * 2 bytes."""
+    def __init__(self, max_games: int, max_seq_len: int, d_model: int, device: torch.device):
+        self.h = torch.zeros(max_games, max_seq_len, d_model, dtype=torch.bfloat16, device=device)
+        self.lens = torch.zeros(max_games, dtype=torch.long, device=device)
+
+    def store_prefill(self, indices: list[int], hidden: list[torch.Tensor]):
+        """Store shared outputs from prefill (multiple positions per game)."""
+        for i, idx in enumerate(indices):
+            L = hidden[i].shape[0]
+            self.h[idx, :L] = hidden[i]
+            self.lens[idx] = L
+
+    def store_decode(self, indices: torch.Tensor, x: torch.Tensor):
+        """Store single new shared output from decode step."""
+        lens = self.lens[indices]
+        self.h[indices, lens] = x.squeeze(1)
+        self.lens[indices] += 1
+
+    def get_full_sequence(self, indices: torch.Tensor):
+        """Return (B, max_len, D) of shared outputs for these games."""
+        lens = self.lens[indices]
+        max_len = lens.max().item()
+        return self.h[indices, :max_len], lens
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float):
         super().__init__()
@@ -178,13 +205,11 @@ class GomokuTransformer(nn.Module):
 
         self.embedding = ActionEmbedding(config.n_positions, config.d_model, config.board_size)
 
-        # Shared backbone
         self.shared_layers = nn.ModuleList([
             TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
             for _ in range(n_shared)
         ])
 
-        # Policy branch
         if self.has_policy:
             self.policy_layers = nn.ModuleList([
                 TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
@@ -197,7 +222,6 @@ class GomokuTransformer(nn.Module):
             self.policy_norm = None
             self.policy_head = None
 
-        # Value branch
         if self.has_value:
             self.value_layers = nn.ModuleList([
                 TransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
@@ -231,37 +255,10 @@ class GomokuTransformer(nn.Module):
         probs = torch.softmax(value_logits.float(), dim=-1)
         return probs[..., 0] - probs[..., 1]
 
-    # ── Branch layer helpers (position-wise, no cross-position attention) ──
-    # Branch layers process each position independently with single-token
-    # self-attention, consistent between training and decode. The shared
-    # layers already aggregate cross-position information via KV cache.
+    # ── Branch layers: full cross-position causal attention ──
     def _forward_branch(self, layers: nn.ModuleList, x: torch.Tensor):
-        B, S, D = x.shape
-        x = x.reshape(B * S, 1, D)
         for layer in layers:
-            h = layer.norm1(x)
-            qkv = layer.attn.qkv(h).reshape(B * S, 1, 3, layer.attn.n_heads, layer.attn.d_head)
-            q, k, v = qkv.unbind(dim=2)
-            q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
-            dropout_p = layer.attn.dropout if self.training else 0.0
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=dropout_p)
-            out = out.transpose(1, 2).reshape(B * S, 1, layer.attn.d_model)
-            x = x + layer.attn.proj(out)
-            x = x + layer.ffn(layer.norm2(x))
-        return x.reshape(B, S, D)
-
-    def _forward_branch_decode(self, layers: nn.ModuleList, x: torch.Tensor):
-        """Single-token decode for branch: same per-position logic as _forward_branch.
-        Input x has shape (B, 1, D)."""
-        for layer in layers:
-            h = layer.norm1(x)
-            qkv = layer.attn.qkv(h).reshape(h.shape[0], 1, 3, layer.attn.n_heads, layer.attn.d_head)
-            q, k, v = qkv.unbind(dim=2)
-            q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=0.0)
-            out = out.transpose(1, 2).reshape(h.shape[0], 1, layer.attn.d_model)
-            x = x + layer.attn.proj(out)
-            x = x + layer.ffn(layer.norm2(x))
+            x = layer(x)
         return x
 
     # ── Public API ──
@@ -297,34 +294,42 @@ class GomokuTransformer(nn.Module):
         if max_cache_len is None:
             max_cache_len = self.config.max_seq_len
         n_shared = len(self.shared_layers)
-        if n_shared == 0:
-            return None  # no shared layers, no KV cache needed
-        return KVCacheManager(
-            max_games=max_games, max_seq_len=max_cache_len,
-            n_layers=n_shared,
-            n_heads=self.config.n_heads,
-            d_head=self.config.d_model // self.config.n_heads,
-            device=next(self.parameters()).device,
-        )
+        device = next(self.parameters()).device
+        kv = None
+        if n_shared > 0:
+            kv = KVCacheManager(
+                max_games=max_games, max_seq_len=max_cache_len,
+                n_layers=n_shared,
+                n_heads=self.config.n_heads,
+                d_head=self.config.d_model // self.config.n_heads,
+                device=device,
+            )
+        branch = BranchCache(max_games, max_cache_len, self.config.d_model, device)
+        return kv, branch
 
     def _run_shared(self, x, cache, indices, mode='extend'):
-        for i, layer in enumerate(self.shared_layers):
-            if cache is not None:
-                if mode == 'store':
-                    x = layer.prefill_store(x, cache, i, indices)
-                elif mode == 'decode':
-                    x = layer.forward_decode(x, cache, i, indices)
-                else:  # extend
-                    x = layer.prefill_extend(x, cache, i, indices)
-            else:
+        if cache is None:
+            for layer in self.shared_layers:
                 x = layer(x)
+            return x
+        for i, layer in enumerate(self.shared_layers):
+            if mode == 'store':
+                x = layer.prefill_store(x, cache, i, indices)
+            elif mode == 'decode':
+                x = layer.forward_decode(x, cache, i, indices)
+            else:  # extend
+                x = layer.prefill_extend(x, cache, i, indices)
         return x
 
     @torch.inference_mode()
-    def prefill(self, positions, players, cache, indices):
+    def prefill(self, positions, players, kv_cache, branch_cache, indices):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             x = self.embedding(positions, players)
-            x = self._run_shared(x, cache, indices, 'store')
+            x = self._run_shared(x, kv_cache, indices, 'store')
+
+            # Store shared outputs for branch-layer attention during decode
+            hidden_list = [x[i] for i in range(len(indices))]
+            branch_cache.store_prefill(indices, hidden_list)
 
             policy = None; value = None
             if self.has_policy:
@@ -342,35 +347,44 @@ class GomokuTransformer(nn.Module):
         return p_out, v_out
 
     @torch.inference_mode()
-    def decode(self, positions, players, cache, indices):
+    def decode(self, positions, players, kv_cache, branch_cache, indices):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             pos_t = positions.unsqueeze(1); plr_t = players.unsqueeze(1)
-            offset = cache.seq_lens[indices] if cache is not None else None
+            offset = kv_cache.seq_lens[indices] if kv_cache is not None else None
             x = self.embedding(pos_t, plr_t, seq_offset=offset)
-            x = self._run_shared(x, cache, indices, 'decode')
+            x = self._run_shared(x, kv_cache, indices, 'decode')
+
+            # Store this shared output in branch cache
+            branch_cache.store_decode(indices, x)
+
+            # Get full sequence of shared outputs for branch attention
+            full_x, lens = branch_cache.get_full_sequence(indices)
 
             policy = None; value = None
             if self.has_policy:
-                xp = self._forward_branch_decode(self.policy_layers, x)
+                xp = self._forward_branch(self.policy_layers, full_x)
                 xp = self.policy_norm(xp)
-                policy = self.policy_head(xp)
+                p_all = self.policy_head(xp)
+                policy = p_all[torch.arange(len(indices)), lens - 1].unsqueeze(1)
             if self.has_value:
-                xv = self._forward_branch_decode(self.value_layers, x)
+                xv = self._forward_branch(self.value_layers, full_x)
                 xv = self.value_norm(xv)
-                value = self.value_head(xv)
+                v_all = self.value_head(xv)
+                value = v_all[torch.arange(len(indices)), lens - 1].unsqueeze(1)
 
-        if cache is not None:
-            cache.advance(indices)
+        if kv_cache is not None:
+            kv_cache.advance(indices)
         p_out = policy.squeeze(1).float() if policy is not None else None
         v_out = self._value_to_scalar(value.squeeze(1)) if value is not None else None
         return p_out, v_out
 
     @torch.inference_mode()
-    def prefill_extend(self, positions, players, cache, indices):
+    def prefill_extend(self, positions, players, kv_cache, indices):
+        """MCTS leaf evaluation: extends KV cache temporarily, full branch attention."""
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            offset = cache.seq_lens[indices] if cache is not None else None
+            offset = kv_cache.seq_lens[indices] if kv_cache is not None else None
             x = self.embedding(positions, players, seq_offset=offset)
-            x = self._run_shared(x, cache, indices, 'extend')
+            x = self._run_shared(x, kv_cache, indices, 'extend')
 
             policy = None; value = None
             if self.has_policy:
@@ -387,8 +401,8 @@ class GomokuTransformer(nn.Module):
         return p_out, v_out
 
     @torch.inference_mode()
-    def evaluate_mcts_leaves(self, positions, players, cache, indices, path_lengths):
-        policy, value = self.prefill_extend(positions, players, cache, indices)
+    def evaluate_mcts_leaves(self, positions, players, kv_cache, indices, path_lengths):
+        policy, value = self.prefill_extend(positions, players, kv_cache, indices)
         leaf_idx = (path_lengths - 1).clamp(min=0)
         leaf_policy = policy[torch.arange(len(indices)), leaf_idx] if policy is not None else None
         leaf_value = value[torch.arange(len(indices)), leaf_idx] if value is not None else None

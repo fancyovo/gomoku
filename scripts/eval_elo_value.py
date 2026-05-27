@@ -33,19 +33,19 @@ class ValueOnlyModel:
     def sample_first_moves(self, bs, dev):
         return torch.randint(0, N_CELLS, (bs,), device=dev)
 
-    def prefill(self, pos, plr, cache, indices):
-        _, v = self.model.prefill(pos, plr, cache, indices)
+    def prefill(self, pos, plr, kv_cache, branch_cache, indices):
+        _, v = self.model.prefill(pos, plr, cache, _br_cache, indices)
         # Replace policy with uniform
         B = pos.shape[0] if isinstance(pos, torch.Tensor) else len(pos)
         u = torch.zeros(B, N_CELLS, device=self.device)
         return u, v
 
-    def decode(self, pos, plr, cache, indices):
-        _, v = self.model.decode(pos, plr, cache, indices)
+    def decode(self, pos, plr, kv_cache, branch_cache, indices):
+        _, v = self.model.decode(pos, plr, cache, _br_cache, indices)
         u = torch.zeros(len(indices), N_CELLS, device=self.device)
         return u, v
 
-    def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
         _, v = self.model.evaluate_mcts_leaves(pos, plr, cache, indices, plen)
         u = torch.zeros(pos.shape[0], N_CELLS, device=self.device)
         return u, v
@@ -59,14 +59,14 @@ class NoisyUniform:
         return m.create_cache(max_games, max_cache_len)
     def sample_first_moves(self, bs, dev):
         return torch.randint(0, 225, (bs,), device=dev)
-    def prefill(self, pos, plr, cache, indices):
+    def prefill(self, pos, plr, kv_cache, branch_cache, indices):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
-    def decode(self, pos, plr, cache, indices):
-        cache.advance(indices)
+    def decode(self, pos, plr, kv_cache, branch_cache, indices):
+        kv_cache.advance(indices)
         return (torch.randn(len(indices), 225, device=DEVICE) * 0.02,
                 torch.zeros(len(indices), device=DEVICE))
-    def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
 
@@ -86,7 +86,7 @@ def play_match(ma, mb):
         return m
 
     mga = mm(); mgb = mm()
-    kva = ma.create_cache(max_games=G_); kvb = mb.create_cache(max_games=G_)
+    kva, _br_kva = ma.create_cache(max_games=G_); kvb, _br_kvb = mb.create_cache(max_games=G_)
     ab = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
     fin = np.zeros(G_, dtype=bool); res = np.zeros(G_, dtype=np.int32)
     p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
@@ -100,8 +100,8 @@ def play_match(ma, mb):
 
     fat = torch.tensor(fa, dtype=torch.long, device=DEVICE).unsqueeze(1)
     pl0 = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    ma.prefill(fat, pl0, kva, list(range(G_)))
-    mb.prefill(fat, pl0, kvb, list(range(G_)))
+    ma.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+    mb.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
     og = torch.from_numpy(p0 | p1).to(DEVICE)
 
     for g in range(G_):
@@ -157,8 +157,8 @@ def play_match(ma, mb):
             else: p1[g, a] = True; og[g, a] = True
         dp_ = torch.from_numpy(na).to(DEVICE)
         dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=DEVICE)
-        ma.decode(dp_, dpl_, kva, torch.from_numpy(act).to(DEVICE))
-        mb.decode(dp_, dpl_, kvb, torch.from_numpy(act).to(DEVICE))
+        ma.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(DEVICE))
+        mb.decode(dp_, dpl_, kvb, _br_kvb, torch.from_numpy(act).to(DEVICE))
         for i, g in enumerate(act):
             r = gomoku_cpp.step(pool, g, int(na[i]))
             if r: fin[g] = True; res[g] = r

@@ -78,7 +78,7 @@ mgr.leaves_per_game = M
 p0 = np.zeros((G, N_CELLS), dtype=bool)
 p1 = np.zeros((G, N_CELLS), dtype=bool)
 mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
-kv = model.create_cache(max_games=G, max_cache_len=250)
+kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
 fa = model.sample_first_moves(G, DEVICE)
 model.prefill(fa.unsqueeze(1),
@@ -155,7 +155,7 @@ while True:
         plen[g] += 1
     dec_p = torch.from_numpy(na).to(DEVICE)
     dec_pl = torch.from_numpy(np_).to(DEVICE)
-    model.decode(dec_p, dec_pl, kv, torch.from_numpy(act).to(DEVICE))
+    model.decode(dec_p, dec_pl, kv, _br_kv, torch.from_numpy(act).to(DEVICE))
     for i, g in enumerate(act):
         r = gomoku_cpp.step(pool, g, int(na[i]))
         if r:

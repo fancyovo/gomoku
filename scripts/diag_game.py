@@ -31,7 +31,7 @@ def run_selfplay(model, G, M=8, S=64, label=""):
     mgr.dirichlet_alpha = 0.03; mgr.leaves_per_game = M
     p0 = np.zeros((G, 225), dtype=bool); p1 = np.zeros((G, 225), dtype=bool)
     mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
-    kv = model.create_cache(max_games=G, max_cache_len=250)
+    kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
     fa = model.sample_first_moves(G, DEVICE)
     model.prefill(fa.unsqueeze(1), torch.zeros(G, 1, dtype=torch.long, device=DEVICE), kv, list(range(G)))
@@ -89,7 +89,7 @@ def run_selfplay(model, G, M=8, S=64, label=""):
             else: p1_c[g, a] = True
             plen[g] += 1
         dec_p = torch.from_numpy(na).to(DEVICE); dec_pl = torch.from_numpy(np_).to(DEVICE)
-        model.decode(dec_p, dec_pl, kv, torch.from_numpy(act).to(DEVICE))
+        model.decode(dec_p, dec_pl, kv, _br_kv, torch.from_numpy(act).to(DEVICE))
         for i, g in enumerate(act):
             r = gomoku_cpp.step(pool, g, int(na[i]))
             if r: fin[g] = True; res[g] = r; mgr.reset_game(g)
@@ -115,7 +115,7 @@ def play_match(ma, mb, G_=256, M_=4, S_=16):
         m.init_roots(np.zeros((G_, 225), dtype=bool), np.zeros((G_, 225), dtype=bool), np.zeros(G_, dtype=np.int32))
         return m
     mga = mm(); mgb = mm()
-    kva = ma.create_cache(max_games=G_); kvb = mb.create_cache(max_games=G_)
+    kva, _br_kva = ma.create_cache(max_games=G_); kvb, _br_kvb = mb.create_cache(max_games=G_)
     ab = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
     fin = np.zeros(G_, dtype=bool); res = np.zeros(G_, dtype=np.int32)
     p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
@@ -126,7 +126,7 @@ def play_match(ma, mb, G_=256, M_=4, S_=16):
         fa[g] = int(fa_a[g].item()) if ab[g] else int(fa_b[g].item()); p0[g, fa[g]] = True
     fat = torch.tensor(fa, dtype=torch.long, device=DEVICE).unsqueeze(1)
     pl0 = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    ma.prefill(fat, pl0, kva, list(range(G_))); mb.prefill(fat, pl0, kvb, list(range(G_)))
+    ma.prefill(fat, pl0, kva, _br_kva, list(range(G_))); mb.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
     og = torch.from_numpy(p0 | p1).to(DEVICE)
 
     for g in range(G_):
@@ -180,8 +180,8 @@ def play_match(ma, mb, G_=256, M_=4, S_=16):
             else: p1[g, a] = True; og[g, a] = True
         dp_ = torch.from_numpy(na).to(DEVICE)
         dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=DEVICE)
-        ma.decode(dp_, dpl_, kva, torch.from_numpy(act).to(DEVICE))
-        mb.decode(dp_, dpl_, kvb, torch.from_numpy(act).to(DEVICE))
+        ma.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(DEVICE))
+        mb.decode(dp_, dpl_, kvb, _br_kvb, torch.from_numpy(act).to(DEVICE))
         for i, g in enumerate(act):
             r = gomoku_cpp.step(pool, g, int(na[i]))
             if r: fin[g] = True; res[g] = r

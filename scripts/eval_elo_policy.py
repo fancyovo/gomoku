@@ -29,11 +29,11 @@ class NoisyUniform:
         return m.create_cache(max_games, max_cache_len)
     def sample_first_moves(self, bs, dev):
         return torch.randint(0, 225, (bs,), device=dev)
-    def prefill(self, pos, plr, cache, indices):
+    def prefill(self, pos, plr, kv_cache, branch_cache, indices):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
-    def decode(self, pos, plr, cache, indices):
-        cache.advance(indices)
+    def decode(self, pos, plr, kv_cache, branch_cache, indices):
+        kv_cache.advance(indices)
         return (torch.randn(len(indices), 225, device=DEVICE) * 0.02,
                 torch.zeros(len(indices), device=DEVICE))
 
@@ -46,8 +46,8 @@ def play_match_policy(ma, mb):
     pool = gomoku_cpp.GamePool(G_)
     pool.reset_all()
 
-    kva = ma.create_cache(max_games=G_)
-    kvb = mb.create_cache(max_games=G_)
+    kva, _br_kva = ma.create_cache(max_games=G_)
+    kvb, _br_kvb = mb.create_cache(max_games=G_)
     a_black = torch.tensor([i % 2 == 0 for i in range(G_)], device=DEVICE)
 
     finished = torch.zeros(G_, dtype=torch.bool)
@@ -64,8 +64,8 @@ def play_match_policy(ma, mb):
     # Prefill both models with the shared first move
     fat = first.unsqueeze(1)
     pl0 = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    ma.prefill(fat, pl0, kva, list(range(G_)))
-    mb.prefill(fat, pl0, kvb, list(range(G_)))
+    ma.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+    mb.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
 
     # Step first moves on C++ board
     for g in range(G_):
@@ -84,8 +84,8 @@ def play_match_policy(ma, mb):
         cp = move % 2
 
         # Both models decode the last move
-        logits_a, _ = ma.decode(last_act, last_plr, kva, idx)
-        logits_b, _ = mb.decode(last_act, last_plr, kvb, idx)
+        logits_a, _ = ma.decode(last_act, last_plr, kva, _br_kva, idx)
+        logits_b, _ = mb.decode(last_act, last_plr, kvb, _br_kvb, idx)
 
         # Use appropriate model's policy for current player
         logits = torch.where(a_black.unsqueeze(1) if cp == 0 else (~a_black).unsqueeze(1),
