@@ -499,6 +499,11 @@ def main():
             new_names = [os.path.basename(c) for c in new_ckpts]
             new_pending = [n for n in new_names if n not in evaluated]
             if not new_pending:
+                # Check for DONE sentinel (training finished, no more checkpoints coming)
+                if os.path.exists(os.path.join(args.ckpt_dir, '.done')):
+                    print(f"[{time.strftime('%H:%M:%S')}] .done sentinel found, "
+                          f"all {len(evaluated)} checkpoints evaluated. Exiting.")
+                    break
                 print(f"[{time.strftime('%H:%M:%S')}] All {len(evaluated)} checkpoints evaluated, "
                       f"waiting for new ones...")
                 time.sleep(args.interval)

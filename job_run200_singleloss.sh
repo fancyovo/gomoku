@@ -46,7 +46,18 @@ echo "CKPT: $CKPT_DIR"
 
 wait $TRAIN_PID
 RC=$?
-echo "Training finished (exit=$RC), stopping monitor..."
+echo "Training finished (exit=$RC). Signalling monitor to finish..."
+touch "$CKPT_DIR/.done"
+
+echo "Waiting up to 30min for monitor to evaluate remaining pairs..."
+for i in $(seq 1 30); do
+    sleep 60
+    if ! kill -0 $MONITOR_PID 2>/dev/null; then
+        echo "Monitor finished on its own."
+        break
+    fi
+done
+echo "Stopping monitor..."
 kill $MONITOR_PID 2>/dev/null || true
 wait $MONITOR_PID 2>/dev/null || true
 echo "=== All done ==="
