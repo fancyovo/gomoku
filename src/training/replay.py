@@ -291,6 +291,7 @@ def run_selfplay(model, device, G, M, S):
                 p0[g, a] = True
             else:
                 p1[g, a] = True
+            occ_g[g, a] = True
             plen[g] += 1
         dec_p = torch.from_numpy(na).to(device)
         dec_pl = torch.from_numpy(np_).to(device)
