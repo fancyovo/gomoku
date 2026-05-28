@@ -21,7 +21,7 @@ def run_mcts_selfplay(model, device, G, M, S):
     mgr = gomoku_cpp.MCTSManager(G, seed_base=np.random.randint(0, 2**31))
     mgr.c_puct = 1.0; mgr.dirichlet_eps = 0.25; mgr.dirichlet_alpha = 0.03
     mgr.leaves_per_game = M
-    mgr.init_roots(np.zeros((G, 225), dtype=bool), np.zeros(G, dtype=np.int32))
+    mgr.init_roots(np.zeros((G, 225), dtype=bool), np.zeros((G, 225), dtype=bool), np.zeros(G, dtype=np.int32))
     kv = model.create_cache(max_games=G, max_cache_len=250)
 
     fa = model.sample_first_moves(G, device)

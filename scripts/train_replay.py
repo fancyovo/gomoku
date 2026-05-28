@@ -263,9 +263,14 @@ def main():
 
         fat = torch.tensor(fa, dtype=torch.long, device=device).unsqueeze(1)
         pl0 = torch.zeros(G_, 1, dtype=torch.long, device=device)
-        model_a.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
-        model_b.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
+        rpa0, rva0 = model_a.prefill(fat, pl0, kva, _br_kva, list(range(G_)))
+        rpb0, rvb0 = model_b.prefill(fat, pl0, kvb, _br_kvb, list(range(G_)))
         og = torch.from_numpy(p0 | p1).to(device)
+        # Root buffers: most recent decode/prefill output for each model
+        root_pol_a = rpa0.float().clone()
+        root_val_a = rva0.float().clone()
+        root_pol_b = rpb0.float().clone()
+        root_val_b = rvb0.float().clone()
 
         for g in range(G_):
             r = gomoku_cpp.step(pool, g, int(fa[g]))
@@ -280,14 +285,14 @@ def main():
             act = np.where(~fin)[0]
             if len(act) == 0: break
             cp = move % 2
-            for mgr, mdl, kv in [(mga, model_a, kva), (mgb, model_b, kvb)]:
-                st = torch.from_numpy(act).to(device)
-                dp = torch.zeros(len(act), 1, dtype=torch.long, device=device)
-                dplr = torch.full((len(act), 1), cp, dtype=torch.long, device=device)
-                dl = torch.ones(len(act), dtype=torch.long, device=device)
-                lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
-                lp = lp.masked_fill(og[act], -1e9)
-                mgr.expand_roots(act.astype(np.int32),
+            act_np = act.astype(np.int32)
+            act_t = torch.from_numpy(act).to(device)
+            for mgr, pol_buf, val_buf, kv in [(mga, root_pol_a, root_val_a, kva),
+                                              (mgb, root_pol_b, root_val_b, kvb)]:
+                # Root expansion from buffered decode/prefill output, not dummy position
+                lp = pol_buf[act].masked_fill(og[act], -1e9)
+                lv = val_buf[act]
+                mgr.expand_roots(act_np,
                                  torch.softmax(lp, -1).cpu().numpy().astype(np.float32),
                                  lv.cpu().numpy().astype(np.float32))
                 for _ in range(S_ELO):
@@ -299,6 +304,7 @@ def main():
                     pl2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(device)
                     lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
                     sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
+                    mdl = model_a if mgr is mga else model_b
                     lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
                     ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
                     lp2 = lp2.masked_fill(ot, -1e9)
@@ -320,11 +326,17 @@ def main():
                 if cp == 0:
                     p0[g, a] = True
                 else:
-                    p1[g, a] = True; og[g, a] = True
+                    p1[g, a] = True
+                og[g, a] = True
             dp_ = torch.from_numpy(na).to(device)
             dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=device)
-            model_a.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(device))
-            model_b.decode(dp_, dpl_, kvb, _br_kvb, torch.from_numpy(act).to(device))
+            dec_slots = torch.from_numpy(act).to(device)
+            new_pa, new_va = model_a.decode(dp_, dpl_, kva, _br_kva, dec_slots)
+            new_pb, new_vb = model_b.decode(dp_, dpl_, kvb, _br_kvb, dec_slots)
+            root_pol_a[act_t] = new_pa.float()
+            root_val_a[act_t] = new_va.float()
+            root_pol_b[act_t] = new_pb.float()
+            root_val_b[act_t] = new_vb.float()
             for i, g in enumerate(act):
                 r = gomoku_cpp.step(pool, g, int(na[i]))
                 if r:

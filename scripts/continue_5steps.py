@@ -30,8 +30,8 @@ def play_match(model_a, model_b):
         m.init_roots(np.zeros((G_, 225), dtype=bool), np.zeros((G_, 225), dtype=bool), np.zeros(G_, dtype=np.int32))
         return m
     mgr_a = make_mgr(); mgr_b = make_mgr()
-    kva = model_a.create_cache(max_games=G_, max_cache_len=250)
-    kvb = model_b.create_cache(max_games=G_, max_cache_len=250)
+    kva, brkva = model_a.create_cache(max_games=G_, max_cache_len=250)
+    kvb, brkvb = model_b.create_cache(max_games=G_, max_cache_len=250)
     a_black = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
     finished = np.zeros(G_, dtype=bool); winners = np.zeros(G_, dtype=np.int32)
     fa_a = model_a.sample_first_moves(G_, DEVICE); fa_b = model_b.sample_first_moves(G_, DEVICE)
@@ -42,9 +42,13 @@ def play_match(model_a, model_b):
         p0[g, first_acts[g]] = True
     fa_t = torch.tensor(first_acts, dtype=torch.long, device=DEVICE).unsqueeze(1)
     plr_t = torch.zeros(G_, 1, dtype=torch.long, device=DEVICE)
-    model_a.prefill(fa_t, plr_t, kva, list(range(G_)))
-    model_b.prefill(fa_t, plr_t, kvb, list(range(G_)))
+    pa0, va0 = model_a.prefill(fa_t, plr_t, kva, brkva, list(range(G_)))
+    pb0, vb0 = model_b.prefill(fa_t, plr_t, kvb, brkvb, list(range(G_)))
     occ_gpu = torch.from_numpy(p0 | p1).to(DEVICE)
+    root_pol_a = pa0.float().clone()
+    root_val_a = va0.float().clone()
+    root_pol_b = pb0.float().clone()
+    root_val_b = vb0.float().clone()
     for g in range(G_):
         r = gomoku_cpp.step(pool, g, int(first_acts[g]))
         if r: finished[g] = True; winners[g] = r
@@ -56,14 +60,13 @@ def play_match(model_a, model_b):
         active = np.where(~finished)[0]
         if len(active) == 0: break
         cp = move % 2
-        for mgr, mdl, kv in [(mgr_a, model_a, kva), (mgr_b, model_b, kvb)]:
-            st = torch.from_numpy(active).to(DEVICE)
-            dp = torch.zeros(len(active), 1, dtype=torch.long, device=DEVICE)
-            dplr = torch.full((len(active), 1), cp, dtype=torch.long, device=DEVICE)
-            dl = torch.ones(len(active), dtype=torch.long, device=DEVICE)
-            lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
-            lp = lp.masked_fill(occ_gpu[active], -1e9); torch.cuda.synchronize()
-            mgr.expand_roots(active.astype(np.int32), torch.softmax(lp, -1).cpu().numpy().astype(np.float32), lv.cpu().numpy().astype(np.float32))
+        act_np = active.astype(np.int32)
+        act_t = torch.from_numpy(active).to(DEVICE)
+        for mgr, pol_buf, val_buf, kv in [(mgr_a, root_pol_a, root_val_a, kva),
+                                          (mgr_b, root_pol_b, root_val_b, kvb)]:
+            lp = pol_buf[active].masked_fill(occ_gpu[active], -1e9); torch.cuda.synchronize()
+            lv = val_buf[active]
+            mgr.expand_roots(act_np, torch.softmax(lp, -1).cpu().numpy().astype(np.float32), lv.cpu().numpy().astype(np.float32))
             for _ in range(ELO_S):
                 sel = mgr.select_all()
                 if sel['max_path_len'] == 0: continue
@@ -73,6 +76,7 @@ def play_match(model_a, model_b):
                 plr_t2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(DEVICE)
                 lens_t = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(DEVICE)
                 slots_t = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(DEVICE)
+                mdl = model_a if mgr is mgr_a else model_b
                 lp, lv = mdl.evaluate_mcts_leaves(pos_t, plr_t2, kv, slots_t, lens_t); torch.cuda.synchronize()
                 occ_t = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(DEVICE).bool()
                 lp = lp.masked_fill(occ_t, -1e9)
@@ -88,11 +92,17 @@ def play_match(model_a, model_b):
                 a = int(np.random.choice(legal)) if len(legal) > 0 else 0
             new_actions[i] = a
             if cp == 0: p0[g, a] = True
-            else: p1[g, a] = True; occ_gpu[g, a] = True
+            else: p1[g, a] = True
+            occ_gpu[g, a] = True
         dec_pos = torch.from_numpy(new_actions).to(DEVICE)
         dec_plr = torch.full((len(active),), cp, dtype=torch.long, device=DEVICE)
-        model_a.decode(dec_pos, dec_plr, kva, torch.from_numpy(active).to(DEVICE))
-        model_b.decode(dec_pos, dec_plr, kvb, torch.from_numpy(active).to(DEVICE))
+        dec_slots_t = torch.from_numpy(active).to(DEVICE)
+        new_pa, new_va = model_a.decode(dec_pos, dec_plr, kva, brkva, dec_slots_t)
+        new_pb, new_vb = model_b.decode(dec_pos, dec_plr, kvb, brkvb, dec_slots_t)
+        root_pol_a[act_t] = new_pa.float()
+        root_val_a[act_t] = new_va.float()
+        root_pol_b[act_t] = new_pb.float()
+        root_val_b[act_t] = new_vb.float()
         for i, g in enumerate(active):
             r = gomoku_cpp.step(pool, g, int(new_actions[i]))
             if r: finished[g] = True; winners[g] = r

@@ -56,7 +56,6 @@ def main():
                          np.zeros(G_, dtype=np.int32))
             return m
         mga = mm(); mgb = mm()
-        kva = ma.create_cache(max_games=G_); kvb = mb.create_cache(max_games=G_)
         ab = np.array([i % 2 == 0 for i in range(G_)], dtype=bool)
         fin = np.zeros(G_, dtype=bool); res = np.zeros(G_, dtype=np.int32)
         p0 = np.zeros((G_, 225), dtype=bool); p1 = np.zeros((G_, 225), dtype=bool)
@@ -67,9 +66,15 @@ def main():
             p0[g, fa[g]] = True
         fat = torch.tensor(fa, dtype=torch.long, device=device).unsqueeze(1)
         pl0 = torch.zeros(G_, 1, dtype=torch.long, device=device)
-        ma.prefill(fat, pl0, kva, list(range(G_)))
-        mb.prefill(fat, pl0, kvb, list(range(G_)))
+        kva, brkva = ma.create_cache(max_games=G_)
+        kvb, brkvb = mb.create_cache(max_games=G_)
+        pa0, va0 = ma.prefill(fat, pl0, kva, brkva, list(range(G_)))
+        pb0, vb0 = mb.prefill(fat, pl0, kvb, brkvb, list(range(G_)))
         og = torch.from_numpy(p0 | p1).to(device)
+        root_pol_a = pa0.float().clone()
+        root_val_a = va0.float().clone()
+        root_pol_b = pb0.float().clone()
+        root_val_b = vb0.float().clone()
         for g in range(G_):
             r = gomoku_cpp.step(pool, g, int(fa[g]))
             if r: fin[g] = True; res[g] = r
@@ -81,14 +86,13 @@ def main():
             act = np.where(~fin)[0]
             if len(act) == 0: break
             cp = move % 2
-            for mgr, mdl, kv in [(mga, ma, kva), (mgb, mb, kvb)]:
-                st = torch.from_numpy(act).to(device)
-                dp = torch.zeros(len(act), 1, dtype=torch.long, device=device)
-                dplr = torch.full((len(act), 1), cp, dtype=torch.long, device=device)
-                dl = torch.ones(len(act), dtype=torch.long, device=device)
-                lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
-                lp = lp.masked_fill(og[act], -1e9)
-                mgr.expand_roots(act.astype(np.int32),
+            act_np = act.astype(np.int32)
+            act_t = torch.from_numpy(act).to(device)
+            for mgr, pol_buf, val_buf, kv in [(mga, root_pol_a, root_val_a, kva),
+                                              (mgb, root_pol_b, root_val_b, kvb)]:
+                lp = pol_buf[act].masked_fill(og[act], -1e9)
+                lv = val_buf[act]
+                mgr.expand_roots(act_np,
                                  torch.softmax(lp, -1).cpu().numpy().astype(np.float32),
                                  lv.cpu().numpy().astype(np.float32))
                 for _ in range(S_):
@@ -100,6 +104,7 @@ def main():
                     pl2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(device)
                     lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
                     sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
+                    mdl = ma if mgr is mga else mb
                     lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
                     ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
                     lp2 = lp2.masked_fill(ot, -1e9)
@@ -117,11 +122,17 @@ def main():
                     a = int(np.random.choice(leg)) if len(leg) > 0 else 0
                 na[i] = a
                 if cp == 0: p0[g, a] = True
-                else: p1[g, a] = True; og[g, a] = True
+                else: p1[g, a] = True
+                og[g, a] = True
             dp_ = torch.from_numpy(na).to(device)
             dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=device)
-            ma.decode(dp_, dpl_, kva, torch.from_numpy(act).to(device))
-            mb.decode(dp_, dpl_, kvb, torch.from_numpy(act).to(device))
+            dec_slots = torch.from_numpy(act).to(device)
+            new_pa, new_va = ma.decode(dp_, dpl_, kva, brkva, dec_slots)
+            new_pb, new_vb = mb.decode(dp_, dpl_, kvb, brkvb, dec_slots)
+            root_pol_a[act_t] = new_pa.float()
+            root_val_a[act_t] = new_va.float()
+            root_pol_b[act_t] = new_pb.float()
+            root_val_b[act_t] = new_vb.float()
             for i, g in enumerate(act):
                 r = gomoku_cpp.step(pool, g, int(na[i]))
                 if r: fin[g] = True; res[g] = r

@@ -218,9 +218,11 @@ def run_selfplay(model, device, G, M, S):
     kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
     fa = model.sample_first_moves(G, device)
-    model.prefill(fa.unsqueeze(1),
-                  torch.zeros(G, 1, dtype=torch.long, device=device),
-                  kv, _br_kv, list(range(G)))
+    root_policy, root_value = model.prefill(
+        fa.unsqueeze(1),
+        torch.zeros(G, 1, dtype=torch.long, device=device),
+        kv, _br_kv, list(range(G)))
+    # root_policy: (G, 225) raw logits, root_value: (G,) scalar
 
     ph = [[] for _ in range(G)]
     plh = [[] for _ in range(G)]
@@ -239,18 +241,20 @@ def run_selfplay(model, device, G, M, S):
             mgr.apply_move(g, a, p0[g], p1[g])
 
     occ_g = torch.from_numpy(p0 | p1).to(device)
+    # Full-size buffers to hold root policy/value from the most recent decode
+    # (or prefill for the first iteration). Updated after each decode call.
+    _root_pol_buf = root_policy.float().clone()  # (G, 225)
+    _root_val_buf = root_value.float().clone()   # (G,)
 
     while True:
         act = np.where(~fin)[0]
         if len(act) == 0:
             break
-        st = torch.from_numpy(act).to(device)
-        cp = int(plen[act[0]]) % 2
-        dp = torch.zeros(len(act), 1, dtype=torch.long, device=device)
-        dplr = torch.full((len(act), 1), cp, dtype=torch.long, device=device)
-        dl = torch.ones(len(act), dtype=torch.long, device=device)
-        lp, lv = model.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
-        lp = lp.masked_fill(occ_g[act], -1e9)
+        act_t = torch.from_numpy(act).to(device)
+        # Root expansion from the most recent decode/prefill output,
+        # NOT from evaluate_mcts_leaves with a dummy position.
+        lp = _root_pol_buf[act].masked_fill(occ_g[act], -1e9)
+        lv = _root_val_buf[act]
         torch.cuda.synchronize()
         mgr.expand_roots(act.astype(np.int32),
                          torch.softmax(lp, -1).cpu().numpy().astype(np.float32),
@@ -295,7 +299,11 @@ def run_selfplay(model, device, G, M, S):
             plen[g] += 1
         dec_p = torch.from_numpy(na).to(device)
         dec_pl = torch.from_numpy(np_).to(device)
-        model.decode(dec_p, dec_pl, kv, _br_kv, torch.from_numpy(act).to(device))
+        dec_slots = torch.from_numpy(act).to(device)
+        _new_pol, _new_val = model.decode(dec_p, dec_pl, kv, _br_kv, dec_slots)
+        # Save current root evaluations for the next iteration's root expansion
+        _root_pol_buf[act_t] = _new_pol.float()
+        _root_val_buf[act_t] = _new_val.float()
         for i, g in enumerate(act):
             r = gomoku_cpp.step(pool, g, int(na[i]))
             if r:

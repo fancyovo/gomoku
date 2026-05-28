@@ -63,8 +63,8 @@ class SelfPlayRunner:
                 micro_indices = active_list[start:start + batch_size]
                 b = len(micro_indices)
 
-                kv_cache = self.model.create_cache(max_games=b,
-                                                    max_cache_len=L + page)
+                kv_cache, br_cache = self.model.create_cache(max_games=b,
+                                                              max_cache_len=L + page)
                 local_idx = list(range(b))
                 idx_t = self._get_idx(b)
                 t0 = time.perf_counter()
@@ -124,7 +124,7 @@ class SelfPlayRunner:
                                              dtype=torch.long, device=self.device)
 
                     logits, _ = self.model.decode(
-                        current_pos, current_plr, kv_cache, idx_t
+                        current_pos, current_plr, kv_cache, br_cache, idx_t
                     )
                     logits = logits.masked_fill(occupied, float('-inf'))
                     probs = torch.softmax(logits, dim=-1)
