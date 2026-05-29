@@ -295,20 +295,11 @@ void MCTSManager::expand_roots(const int* game_indices, int n_games,
         const float* priors = policy_priors + i * MCTS_ACTIONS;
 
         std::vector<std::pair<float, int>> candidates;
-        candidates.reserve(64);
+        candidates.reserve(MCTS_ACTIONS);
         for (int a = 0; a < MCTS_ACTIONS; a++) {
-            if (!root.is_occupied(a) && priors[a] > 0.001f) {
+            if (!root.is_occupied(a)) {
                 candidates.emplace_back(priors[a], a);
             }
-        }
-        if (candidates.empty()) {
-            int best_a = -1; float best_p = -1.0f;
-            for (int a = 0; a < MCTS_ACTIONS; a++) {
-                if (!root.is_occupied(a) && priors[a] > best_p) {
-                    best_p = priors[a]; best_a = a;
-                }
-            }
-            if (best_a >= 0) candidates.emplace_back(best_p, best_a);
         }
 
         std::vector<float> noise;
@@ -369,23 +360,10 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
 
         // Filter: legal actions (not occupied) with P > threshold
         std::vector<std::pair<float, int>> candidates;
-        candidates.reserve(64);
+        candidates.reserve(MCTS_ACTIONS);
         for (int a = 0; a < MCTS_ACTIONS; a++) {
-            if (!leaf.is_occupied(a) && priors[a] > 0.001f) {
+            if (!leaf.is_occupied(a)) {
                 candidates.emplace_back(priors[a], a);
-            }
-        }
-
-        if (candidates.empty()) {
-            int best_a = -1;
-            float best_p = -1.0f;
-            for (int a = 0; a < MCTS_ACTIONS; a++) {
-                if (!leaf.is_occupied(a) && priors[a] > best_p) {
-                    best_p = priors[a]; best_a = a;
-                }
-            }
-            if (best_a >= 0) {
-                candidates.emplace_back(best_p, best_a);
             }
         }
 
