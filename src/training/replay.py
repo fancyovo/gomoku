@@ -217,7 +217,44 @@ def run_selfplay(model, device, G, M, S):
     mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
     kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
-    fa = model.sample_first_moves(G, device)
+    # ── First move: MCTS from empty board ──
+    # Use model.prefill with a dummy token to get policy/value for the empty state.
+    # The policy is technically "predicting move 2 after a dummy move at position 0",
+    # but MCTS leaf evaluations correct this by evaluating actual positions.
+    kv1, br1 = model.create_cache(max_games=G, max_cache_len=250)
+    dummy_pos = torch.zeros(G, 1, dtype=torch.long, device=device)
+    dummy_plr = torch.zeros(G, 1, dtype=torch.long, device=device)
+    first_pol, first_val = model.prefill(dummy_pos, dummy_plr, kv1, br1, list(range(G)))
+    mgr.expand_roots(np.arange(G, dtype=np.int32),
+        torch.softmax(first_pol, -1).cpu().numpy().astype(np.float32),
+        first_val.cpu().numpy().astype(np.float32))
+    for _ in range(S):
+        sel = mgr.select_all()
+        if sel['max_path_len'] == 0: continue
+        vi = np.where(sel['valid_mask'])[0]
+        if len(vi) == 0: continue
+        pt = torch.from_numpy(np.ascontiguousarray(sel['pos_dense'][vi])).to(device)
+        pl2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(device)
+        lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
+        sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
+        lp2, lv2 = model.evaluate_mcts_leaves(pt, pl2, kv1, sl, lt)
+        torch.cuda.synchronize()
+        ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
+        lp2 = lp2.masked_fill(ot, -1e9)
+        mgr.expand_and_backup(vi.astype(np.int32),
+            torch.softmax(lp2, -1).cpu().numpy().astype(np.float32),
+            lv2.cpu().numpy().astype(np.float32))
+    rp_first = mgr.get_root_policies()
+    fa = torch.zeros(G, dtype=torch.long, device=device)
+    for g in range(G):
+        pol = rp_first[g].copy()
+        ps = pol.sum()
+        if ps > 0:
+            fa[g] = int(np.random.choice(225, p=pol / ps))
+        else:
+            fa[g] = int(torch.randint(0, 225, (1,)).item())
+    del kv1, br1
+    # ── Prefill with actual first move ──
     root_policy, root_value = model.prefill(
         fa.unsqueeze(1),
         torch.zeros(G, 1, dtype=torch.long, device=device),
