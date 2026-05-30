@@ -217,17 +217,12 @@ def run_selfplay(model, device, G, M, S):
     mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
     kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
-    # ── First move: MCTS from empty board ──
-    # Use model.prefill with a dummy token to get policy/value for the empty state.
-    # The policy is technically "predicting move 2 after a dummy move at position 0",
-    # but MCTS leaf evaluations correct this by evaluating actual positions.
-    kv1, br1 = model.create_cache(max_games=G, max_cache_len=250)
-    dummy_pos = torch.zeros(G, 1, dtype=torch.long, device=device)
-    dummy_plr = torch.zeros(G, 1, dtype=torch.long, device=device)
-    first_pol, first_val = model.prefill(dummy_pos, dummy_plr, kv1, br1, list(range(G)))
-    mgr.expand_roots(np.arange(G, dtype=np.int32),
-        torch.softmax(first_pol, -1).cpu().numpy().astype(np.float32),
-        first_val.cpu().numpy().astype(np.float32))
+    # ── First move: MCTS with first_move_logits as root prior ──
+    fm_logits = model.first_move_logits.detach()  # (225,)
+    fm_prior = torch.softmax(fm_logits, dim=-1).cpu().numpy()  # (225,)
+    fm_prior_batch = np.tile(fm_prior, (G, 1)).astype(np.float32)  # (G, 225)
+    fm_value = np.zeros(G, dtype=np.float32)  # root value not used in search
+    mgr.expand_roots(np.arange(G, dtype=np.int32), fm_prior_batch, fm_value)
     for _ in range(S):
         sel = mgr.select_all()
         if sel['max_path_len'] == 0: continue
@@ -237,7 +232,7 @@ def run_selfplay(model, device, G, M, S):
         pl2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(device)
         lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
         sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
-        lp2, lv2 = model.evaluate_mcts_leaves(pt, pl2, kv1, sl, lt)
+        lp2, lv2 = model.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
         torch.cuda.synchronize()
         ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
         lp2 = lp2.masked_fill(ot, -1e9)
@@ -245,21 +240,19 @@ def run_selfplay(model, device, G, M, S):
             torch.softmax(lp2, -1).cpu().numpy().astype(np.float32),
             lv2.cpu().numpy().astype(np.float32))
     rp_first = mgr.get_root_policies()
-    fa = torch.zeros(G, dtype=torch.long, device=device)
+    fa = np.zeros(G, dtype=np.int64)
     for g in range(G):
         pol = rp_first[g].copy()
         ps = pol.sum()
         if ps > 0:
             fa[g] = int(np.random.choice(225, p=pol / ps))
         else:
-            fa[g] = int(torch.randint(0, 225, (1,)).item())
-    del kv1, br1
-    # ── Prefill with actual first move ──
+            fa[g] = int(np.random.randint(0, 225))
+    fa_t = torch.from_numpy(fa).to(device)
     root_policy, root_value = model.prefill(
-        fa.unsqueeze(1),
+        fa_t.unsqueeze(1),
         torch.zeros(G, 1, dtype=torch.long, device=device),
         kv, _br_kv, list(range(G)))
-    # root_policy: (G, 225) raw logits, root_value: (G,) scalar
 
     ph = [[] for _ in range(G)]
     plh = [[] for _ in range(G)]
