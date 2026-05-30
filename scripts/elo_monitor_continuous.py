@@ -305,6 +305,8 @@ def main():
     parser.add_argument('--max_gap', type=int, default=5,
                         help='Only evaluate pairs with |i-j| <= max_gap (plus noisy_uniform)')
     parser.add_argument('--interval', type=int, default=30)
+    parser.add_argument('--no-value', action='store_true',
+                        help='Skip value-only head evaluation')
     parser.add_argument('--n_shared', type=int, default=4)
     parser.add_argument('--n_policy', type=int, default=4)
     parser.add_argument('--n_value', type=int, default=4)
@@ -334,8 +336,13 @@ def main():
     print(f"  Cache: {CACHE_FILE}")
 
     def load_model(ckpt_name):
+        ckpt_path = os.path.join(args.ckpt_dir, ckpt_name)
+        try:
+            sd = torch.load(ckpt_path, map_location=DEVICE)
+        except Exception:
+            return None  # file not ready yet (race with training saving checkpoint)
         m = GomokuTransformer(cfg).to(DEVICE).eval()
-        m.load_state_dict(torch.load(os.path.join(args.ckpt_dir, ckpt_name), map_location=DEVICE))
+        m.load_state_dict(sd)
         return m
 
     def get_pair_key(a, b):
@@ -418,6 +425,10 @@ def main():
 
             # Load model once (separate wrappers for each eval type)
             raw_model = load_model(ckpt_name)
+            if raw_model is None:
+                print(f"  File not ready yet, will retry on next poll.")
+                time.sleep(args.interval)
+                continue
             model_i_mcts = raw_model
             model_i_policy = raw_model
             model_i_value = ValueOnlyModel(raw_model, DEVICE)
@@ -469,24 +480,25 @@ def main():
                     del opp_model
                 torch.cuda.empty_cache()
 
-            # Value-only matches
-            for opp_name in existing_opponents:
-                print(f'  Value: {ckpt_name} vs {opp_name} ...', end=' ', flush=True)
-                t0 = time.perf_counter()
+            # Value-only matches (optional)
+            if not args.no_value:
+                for opp_name in existing_opponents:
+                    print(f'  Value: {ckpt_name} vs {opp_name} ...', end=' ', flush=True)
+                    t0 = time.perf_counter()
 
-                if opp_name == uni_name:
-                    opp_model = uni
-                else:
-                    opp_model = ValueOnlyModel(load_model(opp_name), DEVICE)
+                    if opp_name == uni_name:
+                        opp_model = uni
+                    else:
+                        opp_model = ValueOnlyModel(load_model(opp_name), DEVICE)
 
-                wa, wb, d = eval_pair(model_i_value, opp_model, ckpt_name, opp_name, 'value', 'value')
-                dt = time.perf_counter() - t0
-                wr = wa / (wa + wb) * 100 if (wa + wb) > 0 else 50.0
-                print(f'{wa}-{wb} WR={wr:.1f}% ({dt:.0f}s)')
+                    wa, wb, d = eval_pair(model_i_value, opp_model, ckpt_name, opp_name, 'value', 'value')
+                    dt = time.perf_counter() - t0
+                    wr = wa / (wa + wb) * 100 if (wa + wb) > 0 else 50.0
+                    print(f'{wa}-{wb} WR={wr:.1f}% ({dt:.0f}s)')
 
-                if opp_name != uni_name:
-                    del opp_model
-                torch.cuda.empty_cache()
+                    if opp_name != uni_name:
+                        del opp_model
+                    torch.cuda.empty_cache()
 
             del raw_model, model_i_value
             torch.cuda.empty_cache()

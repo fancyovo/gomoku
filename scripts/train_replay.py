@@ -182,7 +182,10 @@ def main():
         ttr = time.perf_counter() - t0
 
         model.eval()
-        torch.save(model.state_dict(), f'{args.ckpt_dir}/step_{step:06d}.pt')
+        ckpt_path = f'{args.ckpt_dir}/step_{step:06d}.pt'
+        tmp_path = ckpt_path + '.tmp'
+        torch.save(model.state_dict(), tmp_path)
+        os.replace(tmp_path, ckpt_path)
         print(f"  Train: test_p={tp:.4f} test_v={tv:.4f} "
               f"train_p={tr_p_loss:.4f} train_v={tr_v_loss:.4f} "
               f"aug={taug:.0f}s tr={ttr:.0f}s")
