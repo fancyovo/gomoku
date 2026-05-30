@@ -190,7 +190,7 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
             first_reward = vt[:, 0, 0] - vt[:, 0, 1]
             fm_loss, _, _ = reinforce_loss(
                 fm_logits.float(), pos[:, 0], first_reward, first_mask,
-                entropy_coef=0.01, loss_scale=1.0)
+                entropy_coef=0.0, loss_scale=1.0)
             fm_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad()
