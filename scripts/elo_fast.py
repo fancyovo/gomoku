@@ -54,6 +54,7 @@ def run_match(mdl_a, mdl_b, G=256, S=16):
             mga.apply_move(g, int(fa[g]), bp, np.zeros(N_CELLS, bool))
             mgb.apply_move(g, int(fa[g]), bp, np.zeros(N_CELLS, bool))
 
+    total_sims_actual = 0
     for move in range(1, 240):
         act = np.where(~fin)[0]
         if len(act) == 0: break
@@ -65,6 +66,7 @@ def run_match(mdl_a, mdl_b, G=256, S=16):
             lv = valb[act]
             mgr.expand_roots(anp, torch.softmax(lp, -1).cpu().numpy().astype(np.float32), lv.cpu().numpy().astype(np.float32))
             for _ in range(S_):
+                total_sims_actual += 1
                 sel = mgr.select_all()
                 if sel['max_path_len'] == 0: continue
                 vi = np.where(sel['valid_mask'])[0]
