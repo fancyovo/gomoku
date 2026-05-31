@@ -392,12 +392,13 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
         leaf.expanded = !leaf.edges.empty();
         if (leaf.expanded && leaf.N_total == 0) leaf.N_total = 1;
 
-        // Backup: values[li] is from leaf's current player's perspective.
-        // The edge connecting parent->child was made by parent's player,
-        // who is 1-leaf.player. Flip once to store from edge maker's perspective.
+        // Backup: values[li] is from mover's perspective (the player who
+        // made the last move in the path, = edge owner at the last level).
+        // Model output value at position path_length-1 is trained from
+        // the mover's perspective (aligned with plr[:, path_length-1]).
         // select_leaf added +3 virtual N to each edge for within-round diversity.
         // Undo 2 of those so net N per leaf = +1 (3 - 2 = 1).
-        float v = -values[li];
+        float v = values[li];
         for (int i = (int)st.path_nodes.size() - 1; i >= 0; i--) {
             int n_idx = st.path_nodes[i];
             int e_idx = st.path_edges[i];
