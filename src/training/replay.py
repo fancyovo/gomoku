@@ -250,9 +250,10 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
         else:
             fa[g] = int(np.random.randint(0, 225))
     fa_t = torch.from_numpy(fa).to(device)
+    fp_t = torch.from_numpy(first_players).to(device).unsqueeze(1)
     root_policy, root_value = model.prefill(
         fa_t.unsqueeze(1),
-        torch.zeros(G, 1, dtype=torch.long, device=device),
+        fp_t,
         kv, _br_kv, list(range(G)))
 
     ph = [[] for _ in range(G)]
