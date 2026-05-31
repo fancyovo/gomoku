@@ -214,7 +214,8 @@ def run_selfplay(model, device, G, M, S):
 
     p0 = np.zeros((G, 225), dtype=bool)
     p1 = np.zeros((G, 225), dtype=bool)
-    mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
+    first_players = np.random.randint(0, 2, size=G).astype(np.int32)
+    mgr.init_roots(p0, p1, first_players)
     kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
     # ── First move: MCTS with first_move_logits as root prior ──
@@ -263,7 +264,10 @@ def run_selfplay(model, device, G, M, S):
 
     for g in range(G):
         a = int(fa[g].item())
-        ph[g].append(a); plh[g].append(0); p0[g, a] = True; plen[g] = 1
+        fp = int(first_players[g])
+        ph[g].append(a); plh[g].append(fp); plen[g] = 1
+        if fp == 0: p0[g, a] = True
+        else: p1[g, a] = True
         r = gomoku_cpp.step(pool, g, a)
         if r:
             fin[g] = True; res[g] = r; mgr.reset_game(g)
