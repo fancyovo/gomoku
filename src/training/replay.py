@@ -214,15 +214,14 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
 
     p0 = np.zeros((G, 225), dtype=bool)
     p1 = np.zeros((G, 225), dtype=bool)
-    first_players = np.random.randint(0, 2, size=G).astype(np.int32)
-    mgr.init_roots(p0, p1, first_players)
+    mgr.init_roots(p0, p1, np.zeros(G, dtype=np.int32))
     kv, _br_kv = model.create_cache(max_games=G, max_cache_len=250)
 
     # ── First move: MCTS with first_move_logits as root prior ──
-    fm_logits = model.first_move_logits.detach()  # (225,)
-    fm_prior = torch.softmax(fm_logits, dim=-1).cpu().numpy()  # (225,)
-    fm_prior_batch = np.tile(fm_prior, (G, 1)).astype(np.float32)  # (G, 225)
-    fm_value = np.zeros(G, dtype=np.float32)  # root value not used in search
+    fm_logits = model.first_move_logits.detach()
+    fm_prior = torch.softmax(fm_logits, dim=-1).cpu().numpy()
+    fm_prior_batch = np.tile(fm_prior, (G, 1)).astype(np.float32)
+    fm_value = np.zeros(G, dtype=np.float32)
     mgr.expand_roots(np.arange(G, dtype=np.int32), fm_prior_batch, fm_value)
     for _ in range(S):
         sel = mgr.select_all()
@@ -250,10 +249,9 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
         else:
             fa[g] = int(np.random.randint(0, 225))
     fa_t = torch.from_numpy(fa).to(device)
-    fp_t = torch.from_numpy(first_players).to(device).unsqueeze(1)
     root_policy, root_value = model.prefill(
         fa_t.unsqueeze(1),
-        fp_t,
+        torch.zeros(G, 1, dtype=torch.long, device=device),
         kv, _br_kv, list(range(G)))
 
     ph = [[] for _ in range(G)]
@@ -265,10 +263,7 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
 
     for g in range(G):
         a = int(fa[g].item())
-        fp = int(first_players[g])
-        ph[g].append(a); plh[g].append(fp); plen[g] = 1
-        if fp == 0: p0[g, a] = True
-        else: p1[g, a] = True
+        ph[g].append(a); plh[g].append(0); p0[g, a] = True; plen[g] = 1
         r = gomoku_cpp.step(pool, g, a)
         if r:
             fin[g] = True; res[g] = r; mgr.reset_game(g)
@@ -370,6 +365,18 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
             'actual_len': L,
             'result': rv,
         })
+    # Flip colors for half the trajectories to balance black/white in training data
+    flip_rng = np.random.RandomState(seed=42)
+    for g in range(G):
+        if flip_rng.rand() < 0.5:
+            t = traj[g]
+            t['players'] = 1 - t['players']
+            t['value_targets'] = t['value_targets'][:, ::-1].copy()
+            if t['result'] == 1:
+                t['result'] = 2
+            elif t['result'] == 2:
+                t['result'] = 1
+
     bw = int((res == 1).sum())
     ww = int((res == 2).sum())
     dr = int((res == 3).sum()) + int((res == 0).sum())
