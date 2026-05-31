@@ -53,6 +53,8 @@ def main():
                         help='Use raw CE (no ln(N) normalization) so policy and value contribute equally')
     parser.add_argument('--train_fraction', type=float, default=1.0,
                         help='Fraction of training data to use per step (subsampled randomly)')
+    parser.add_argument('--c_puct', type=float, default=1.0,
+                        help='PUCT exploration constant for MCTS')
     args = parser.parse_args()
 
     torch.set_num_threads(2)  # limit PyTorch CPU parallelism, GPU is the bottleneck
@@ -146,7 +148,7 @@ def main():
         # Self-play
         t0 = time.perf_counter()
         model.eval()
-        new_traj, avg_len, bw, ww, dr = run_selfplay(model, device, args.G, args.M, args.S)
+        new_traj, avg_len, bw, ww, dr = run_selfplay(model, device, args.G, args.M, args.S, c_puct=args.c_puct)
         tsp = time.perf_counter() - t0
         print(f"  Self-play: G={len(new_traj)} len={avg_len:.0f} "
               f"B={bw} W={ww} D={dr} ({tsp:.0f}s)")

@@ -201,13 +201,13 @@ def train_one_epoch(model, opt, train_ds, test_ds, device, batch_size=128,
     return test_p, test_v, train_p_loss, train_v_loss
 
 
-def run_selfplay(model, device, G, M, S):
+def run_selfplay(model, device, G, M, S, c_puct=1.0):
     """Run G games of MCTS self-play with M leaves and S sims/leaf.
     Returns list of trajectory dicts plus stats."""
     pool = gomoku_cpp.GamePool(G)
     pool.reset_all()
     mgr = gomoku_cpp.MCTSManager(G, seed_base=np.random.randint(0, 2 ** 31))
-    mgr.c_puct = 1.0
+    mgr.c_puct = c_puct
     mgr.dirichlet_eps = 0.25
     mgr.dirichlet_alpha = 0.03
     mgr.leaves_per_game = M
