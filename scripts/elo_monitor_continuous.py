@@ -41,7 +41,7 @@ class NoisyUniform:
         kv_cache.advance(indices)
         return (torch.randn(len(indices), 225, device=DEVICE) * 0.02,
                 torch.zeros(len(indices), device=DEVICE))
-    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, branch_cache, indices, plen):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * 0.02,
                 torch.zeros(pos.shape[0], device=DEVICE))
 
@@ -60,8 +60,8 @@ class ValueOnlyModel:
     def decode(self, pos, plr, kv_cache, branch_cache, indices):
         _, v = self.model.decode(pos, plr, kv_cache, branch_cache, indices)
         return torch.zeros(len(indices), 225, device=self.device), v
-    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
-        _, v = self.model.evaluate_mcts_leaves(pos, plr, kv_cache, indices, plen)
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, branch_cache, indices, plen):
+        _, v = self.model.evaluate_mcts_leaves(pos, plr, kv_cache, branch_cache, indices, plen)
         return torch.zeros(pos.shape[0], 225, device=self.device), v
 
 
@@ -116,8 +116,8 @@ def play_match_mcts(ma, mb):
         cp = move % 2
         act_np = act.astype(np.int32)
         act_t = torch.from_numpy(act).to(DEVICE)
-        for mgr, pol_buf, val_buf, kv in [(mga, root_pol_a, root_val_a, kva),
-                                          (mgb, root_pol_b, root_val_b, kvb)]:
+        for mgr, pol_buf, val_buf, kv, br_kv in [(mga, root_pol_a, root_val_a, kva, _br_kva),
+                                                  (mgb, root_pol_b, root_val_b, kvb, _br_kvb)]:
             lp = pol_buf[act].masked_fill(og[act], -1e9)
             lv = val_buf[act]
             mgr.expand_roots(act_np,
@@ -133,7 +133,7 @@ def play_match_mcts(ma, mb):
                 lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(DEVICE)
                 sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(DEVICE)
                 mdl = ma if mgr is mga else mb
-                lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
+                lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, br_kv, sl, lt)
                 ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(DEVICE).bool()
                 lp2 = lp2.masked_fill(ot, -1e9)
                 mgr.expand_and_backup(vi.astype(np.int32),

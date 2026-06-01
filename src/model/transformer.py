@@ -113,7 +113,8 @@ class CausalSelfAttention(nn.Module):
         k_full, v_full, new_lens = cache.write_and_get_kv(layer_idx, indices, k_new, v_new)
         max_len = new_lens.max().item()
         pos = torch.arange(max_len, device=x.device)
-        mask = pos.unsqueeze(0) >= new_lens.unsqueeze(1)
+        # SDPA BoolTensor: True=KEPT, False=MASKED. Keep positions < new_lens.
+        mask = pos.unsqueeze(0) < new_lens.unsqueeze(1)
         mask = mask.unsqueeze(1).unsqueeze(1)
         out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask, dropout_p=0.0)
         out = out.transpose(1, 2).reshape(b, s, d)
@@ -150,7 +151,8 @@ class CausalSelfAttention(nn.Module):
         T_b = T_old.view(-1, 1, 1, 1)
         stale_old = (col_idx >= T_b) & (col_idx < T_max)
         future_new = (col_idx >= T_max) & (col_idx - T_max > row_r)
-        mask = stale_old | future_new
+        # SDPA BoolTensor: True=KEPT, False=MASKED. Keep valid positions.
+        mask = ~(stale_old | future_new)
         out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask, dropout_p=0.0)
         out = out.transpose(1, 2).reshape(b, d_new, self.d_model)
         return self.proj(out)
@@ -177,7 +179,8 @@ class TransformerBlock(nn.Module):
         self.ffn = SwiGLUFFN(d_model, d_ff, dropout)
 
     def forward(self, x):
-        return x + self.ffn(self.norm2(x + self.attn(self.norm1(x))))
+        h = x + self.attn(self.norm1(x))
+        return h + self.ffn(self.norm2(h))
 
     def forward_decode(self, x, cache, layer_idx, indices):
         x = x + self.attn.forward_decode(self.norm1(x), cache, layer_idx, indices)
@@ -379,30 +382,46 @@ class GomokuTransformer(nn.Module):
         return p_out, v_out
 
     @torch.inference_mode()
-    def prefill_extend(self, positions, players, kv_cache, indices):
-        """MCTS leaf evaluation: extends KV cache temporarily, full branch attention."""
+    def prefill_extend(self, positions, players, kv_cache, branch_cache, indices):
+        """MCTS leaf evaluation: extends KV cache temporarily, full branch attention.
+        Concatenates new shared outputs with branch cache history so branch layers
+        have full sequence context for cross-position attention."""
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             offset = kv_cache.seq_lens[indices] if kv_cache is not None else None
             x = self.embedding(positions, players, seq_offset=offset)
             x = self._run_shared(x, kv_cache, indices, 'extend')
 
+            if branch_cache is not None:
+                # Concatenate new shared outputs with branch cache history
+                old_x, _ = branch_cache.get_full_sequence(indices)
+                path_len = x.shape[1]
+                full_x = torch.cat([old_x, x], dim=1)
+            else:
+                full_x = x
+
             policy = None; value = None
             if self.has_policy:
-                xp = self._forward_branch(self.policy_layers, x)
+                xp = self._forward_branch(self.policy_layers, full_x)
                 xp = self.policy_norm(xp)
                 policy = self.policy_head(xp)
             if self.has_value:
-                xv = self._forward_branch(self.value_layers, x)
+                xv = self._forward_branch(self.value_layers, full_x)
                 xv = self.value_norm(xv)
                 value = self.value_head(xv)
 
-        p_out = policy.float() if policy is not None else None
-        v_out = self._value_to_scalar(value) if value is not None else None
+        # Return only the path portion (last path_len positions)
+        if branch_cache is not None:
+            p_out = policy[:, -path_len:, :].float() if policy is not None else None
+            v_out = self._value_to_scalar(value[:, -path_len:, :]) if value is not None else None
+        else:
+            p_out = policy.float() if policy is not None else None
+            v_out = self._value_to_scalar(value) if value is not None else None
         return p_out, v_out
 
     @torch.inference_mode()
-    def evaluate_mcts_leaves(self, positions, players, kv_cache, indices, path_lengths):
-        policy, value = self.prefill_extend(positions, players, kv_cache, indices)
+    def evaluate_mcts_leaves(self, positions, players, kv_cache, branch_cache, indices, path_lengths):
+        """branch_cache can be None; falls back to old behavior (no branch context)."""
+        policy, value = self.prefill_extend(positions, players, kv_cache, branch_cache, indices)
         leaf_idx = (path_lengths - 1).clamp(min=0)
         leaf_policy = policy[torch.arange(len(indices)), leaf_idx] if policy is not None else None
         leaf_value = value[torch.arange(len(indices)), leaf_idx] if value is not None else None

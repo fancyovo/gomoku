@@ -156,5 +156,72 @@ PYBIND11_MODULE(gomoku_cpp, m) {
         .def_readwrite("c_puct", &MCTSManager::c_puct)
         .def_readwrite("dirichlet_eps", &MCTSManager::dirichlet_eps)
         .def_readwrite("dirichlet_alpha", &MCTSManager::dirichlet_alpha)
-        .def_readonly("num_games", &MCTSManager::num_games);
+        .def_readonly("num_games", &MCTSManager::num_games)
+        // DEBUG: expose root edge raw data for game_idx
+        .def("debug_root_edges", [](MCTSManager& mgr, int game_idx) -> py::dict {
+            if (game_idx < 0 || game_idx >= mgr.num_games) return py::dict();
+            auto& tree = mgr.trees[game_idx];
+            if (tree.nodes.empty()) return py::dict();
+            const MCTSNode& root = tree.nodes[0];
+            int ne = (int)root.edges.size();
+            py::dict d;
+            d["N_total"] = root.N_total;
+            auto acts = py::array_t<int>(ne);
+            auto ns   = py::array_t<int>(ne);
+            auto ws   = py::array_t<float>(ne);
+            auto ps   = py::array_t<float>(ne);
+            auto* pa = acts.mutable_data();
+            auto* pn = ns.mutable_data();
+            auto* pw = ws.mutable_data();
+            auto* pp = ps.mutable_data();
+            for (int i = 0; i < ne; i++) {
+                pa[i] = root.edges[i].action;
+                pn[i] = root.edges[i].N;
+                pw[i] = root.edges[i].W;
+                pp[i] = root.edges[i].P;
+            }
+            d["actions"] = std::move(acts);
+            d["N"] = std::move(ns);
+            d["W"] = std::move(ws);
+            d["P"] = std::move(ps);
+            return d;
+        })
+        // DEBUG: given a root action, read child node's edges (if child exists)
+        .def("debug_child_edges", [](MCTSManager& mgr, int game_idx, int root_action) -> py::dict {
+            if (game_idx < 0 || game_idx >= mgr.num_games) return py::dict();
+            auto& tree = mgr.trees[game_idx];
+            if (tree.nodes.empty()) return py::dict();
+            const MCTSNode& root = tree.nodes[0];
+            for (const auto& e : root.edges) {
+                if (e.action == root_action && e.child_idx >= 0) {
+                    const MCTSNode& child = tree.nodes[e.child_idx];
+                    int ne = (int)child.edges.size();
+                    py::dict d;
+                    d["N_total"] = child.N_total;
+                    d["player"] = child.player;
+                    d["terminal"] = child.terminal;
+                    auto acts = py::array_t<int>(ne);
+                    auto ns   = py::array_t<int>(ne);
+                    auto ws   = py::array_t<float>(ne);
+                    auto ps   = py::array_t<float>(ne);
+                    auto* pa = acts.mutable_data();
+                    auto* pn = ns.mutable_data();
+                    auto* pw = ws.mutable_data();
+                    auto* pp = ps.mutable_data();
+                    for (int i = 0; i < ne; i++) {
+                        pa[i] = child.edges[i].action;
+                        pn[i] = child.edges[i].N;
+                        pw[i] = child.edges[i].W;
+                        pp[i] = child.edges[i].P;
+                    }
+                    d["actions"] = std::move(acts);
+                    d["N"] = std::move(ns);
+                    d["W"] = std::move(ws);
+                    d["P"] = std::move(ps);
+                    return d;
+                }
+            }
+            // edge not found or child not created yet
+            return py::dict();
+        });
 }
