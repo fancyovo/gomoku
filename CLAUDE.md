@@ -4,8 +4,22 @@
 - Transformer-based Gomoku AI trained with AlphaZero-style self-play + MCTS distillation
 - Board engine in C++ (bitboard, OpenMP), bridge via pybind11
 - Inference uses KV cache, bf16 mixed precision
-- Replay buffer training: G=512 games/step, pool=4096, alternating policy/value optimization
-- Best models: scratch5/step_4 (ELO 1795), pretrain10/step_2 (ELO 1802)
+- Replay buffer training: G=2048 games/step, pool=4096, policy+value joint optimization
+- Current config (fix_v5): `--G 2048 --M 8 --S 64 --n_steps 500 --lr 1e-4 --c_puct 0.2 --single_loss --pool_mult 2 --train_fraction 0.625`
+
+## Experiment Status (as of 2026-06-02)
+- **Overall result: FAILURE** — model learns to cluster stones and has basic attack patterns (column/row 5-in-a-row setups) but CANNOT effectively organize offense or defend against opponent threats
+- **Known limitations**:
+  - Cannot defend sleep-4 (opponent 4-in-a-row threat) even with S=4096 MCTS
+  - Value network barely converges (test_v ~0.95 after 200+ steps)
+  - Policy network shows no improvement (test_p ~0.98 throughout)
+  - Self-play B/W balance oscillates wildly, game length fluctuates
+- **Bug history**:
+  - `TransformerBlock.forward` residual bug (FFN used `x` instead of `h=x+attn`) — fixed
+  - SDPA BoolTensor mask inverted in `forward_decode` and `prefill_extend` — fixed
+  - `prefill_extend` missing branch cache for full sequence branch attention — fixed
+  - Q_init=V_parent tried and reverted (caused instability)
+- **Best models**: scratch5/step_4 (ELO 1795), pretrain10/step_2 (ELO 1802) — from very early experiments
 
 ## Cluster Resources
 - Partition: Students, 2×GPU, 24×CPU, 1-day time limit
