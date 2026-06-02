@@ -29,7 +29,19 @@ python scripts/eval_elo_curve.py --ckpt_dir checkpoints/run1
 
 **Replay buffer**: Pool size = 8×G (4096 games). Each step: self-play G games → discard G random old → add new → train 1 epoch on full pool.
 
-**Alternating optimization**: Policy-only and value-only backward+step per batch, avoiding gradient scale imbalance.
+## Experiment Record
+
+### Fix v5 (latest, 2026-06, c_puct=0.2)
+**Config**: `--G 2048 --M 8 --S 64 --n_steps 500 --lr 1e-4 --c_puct 0.2 --single_loss --pool_mult 2 --train_fraction 0.625 --from_scratch`
+
+**Result: FAILURE** — model learns basic stone clustering and simple row/column attack patterns, but cannot:
+- Defend against opponent sleep-4 threats (4-in-a-row)
+- Execute coordinated attacks
+- Improve policy beyond near-random (test_p ~0.98 throughout)
+- Stabilize value predictions (test_v ~0.95 after 200+ steps)
+- Self-play games shorten from ~60 to ~20-30 plies, B/W balance oscillates.
+
+**Bugs fixed**: `TransformerBlock.forward` residual, SDPA mask inverted, branch cache missing in `prefill_extend`. All fixes are correct but did not resolve the fundamental failure: the model does not learn from MCTS self-play.
 
 ## Key Files
 
