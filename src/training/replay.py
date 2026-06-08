@@ -365,13 +365,14 @@ def run_selfplay(model, device, G, M, S, c_puct=1.0):
             'actual_len': L,
             'result': rv,
         })
-    # Flip colors for half the trajectories to balance black/white in training data
+    # Flip colors for half the trajectories to balance black/white in training data.
+    # value_targets are from the mover's perspective ([win, lose]), not from an
+    # absolute black/white perspective, so they must not be swapped here.
     flip_rng = np.random.RandomState(seed=42)
     for g in range(G):
         if flip_rng.rand() < 0.5:
             t = traj[g]
             t['players'] = 1 - t['players']
-            t['value_targets'] = t['value_targets'][:, ::-1].copy()
             if t['result'] == 1:
                 t['result'] = 2
             elif t['result'] == 2:

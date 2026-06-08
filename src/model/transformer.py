@@ -419,8 +419,18 @@ class GomokuTransformer(nn.Module):
         return p_out, v_out
 
     @torch.inference_mode()
-    def evaluate_mcts_leaves(self, positions, players, kv_cache, branch_cache, indices, path_lengths):
-        """branch_cache can be None; falls back to old behavior (no branch context)."""
+    def evaluate_mcts_leaves(self, positions, players, kv_cache, branch_cache,
+                             indices=None, path_lengths=None):
+        """Evaluate MCTS leaves.
+
+        New call shape includes branch_cache. The old 5-argument call
+        (positions, players, kv_cache, indices, path_lengths) is accepted for
+        legacy scripts and falls back to no branch context.
+        """
+        if path_lengths is None:
+            path_lengths = indices
+            indices = branch_cache
+            branch_cache = None
         policy, value = self.prefill_extend(positions, players, kv_cache, branch_cache, indices)
         leaf_idx = (path_lengths - 1).clamp(min=0)
         leaf_policy = policy[torch.arange(len(indices)), leaf_idx] if policy is not None else None

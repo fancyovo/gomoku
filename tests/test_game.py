@@ -35,7 +35,7 @@ def test_illegal_move():
         b.play_move(0)
         r = b.play_move(0)  # occupied
         assert r == -1
-        assert b.result == 2  # white loses (played illegal)
+        assert b.result == 1  # white loses (black wins)
         print("  [PASS] test_illegal_move")
     except ImportError:
         print("  [SKIP] gomoku_cpp not built")
@@ -44,14 +44,15 @@ def test_illegal_move():
 def test_game_manager():
     try:
         import gomoku_cpp
-        mgr = gomoku_cpp.GameManager(8, seed=123)
-        assert mgr.active_count == 8
+        pool = gomoku_cpp.GamePool(8)
+        pool.reset_all()
+        assert pool.active_count() == 8
 
         # Step all games
         actions = [i for i in range(8)]  # each plays a different first move
-        finished = mgr.step(mgr.active_indices, actions)
-        assert len(finished) == 0  # no game ends after 1 move
-        assert mgr.active_count == 8
+        results = [gomoku_cpp.step(pool, i, a) for i, a in enumerate(actions)]
+        assert all(r == 0 for r in results)  # no game ends after 1 move
+        assert pool.active_count() == 8
         print("  [PASS] test_game_manager")
     except ImportError:
         print("  [SKIP] gomoku_cpp not built")

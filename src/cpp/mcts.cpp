@@ -308,6 +308,7 @@ void MCTSManager::expand_roots(const int* game_indices, int n_games,
         }
 
         root.edges.clear();
+        root.N_total = 0;
         root.edges.reserve(candidates.size());
         for (size_t j = 0; j < candidates.size(); j++) {
             MCTSEdge e;
@@ -321,7 +322,7 @@ void MCTSManager::expand_roots(const int* game_indices, int n_games,
         }
         root.V = values[i];
         root.expanded = !root.edges.empty();
-        if (root.expanded && root.N_total == 0) root.N_total = 1;
+        if (root.expanded) root.N_total = 1;
     }
 }
 
@@ -356,7 +357,7 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
             continue;
         }
 
-        const float* priors = policy_priors + li * MCTS_ACTIONS;
+        const float* priors = policy_priors + i * MCTS_ACTIONS;
 
         // Filter: legal actions (not occupied) with P > threshold
         std::vector<std::pair<float, int>> candidates;
@@ -388,7 +389,7 @@ void MCTSManager::expand_and_backup(const int* leaf_indices, int n_leaves,
             leaf.edges.push_back(e);
         }
 
-        leaf.V = values[li];
+        leaf.V = values[i];
         leaf.expanded = !leaf.edges.empty();
         if (leaf.expanded && leaf.N_total == 0) leaf.N_total = 1;
 

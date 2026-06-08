@@ -42,7 +42,7 @@ class NoisyUniform:
         return (torch.randn(len(indices), 225, device=DEVICE) * self.ns,
                 torch.zeros(len(indices), device=DEVICE))
 
-    def evaluate_mcts_leaves(self, pos, plr, kv_cache, indices, plen):
+    def evaluate_mcts_leaves(self, pos, plr, kv_cache, branch_cache, indices, plen):
         return (torch.randn(pos.shape[0], 225, device=DEVICE) * self.ns,
                 torch.zeros(pos.shape[0], device=DEVICE))
 
@@ -93,12 +93,12 @@ def play_match(ma, mb):
         act = np.where(~fin)[0]
         if len(act) == 0: break
         cp = move % 2
-        for mgr, mdl, kv in [(mga, ma, kva), (mgb, mb, kvb)]:
+        for mgr, mdl, kv, brkv in [(mga, ma, kva, _br_kva), (mgb, mb, kvb, _br_kvb)]:
             st = torch.from_numpy(act).to(DEVICE)
             dp = torch.zeros(len(act), 1, dtype=torch.long, device=DEVICE)
             dplr = torch.full((len(act), 1), cp, dtype=torch.long, device=DEVICE)
             dl = torch.ones(len(act), dtype=torch.long, device=DEVICE)
-            lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, st, dl)
+            lp, lv = mdl.evaluate_mcts_leaves(dp, dplr, kv, brkv, st, dl)
             lp = lp.masked_fill(og[act], -1e9)
             mgr.expand_roots(act.astype(np.int32),
                              torch.softmax(lp, -1).cpu().numpy().astype(np.float32),
@@ -112,7 +112,7 @@ def play_match(ma, mb):
                 pl2 = torch.from_numpy(np.ascontiguousarray(sel['plr_dense'][vi])).to(DEVICE)
                 lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(DEVICE)
                 sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(DEVICE)
-                lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
+                lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, brkv, sl, lt)
                 ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(DEVICE).bool()
                 lp2 = lp2.masked_fill(ot, -1e9)
                 mgr.expand_and_backup(vi.astype(np.int32),
@@ -129,8 +129,11 @@ def play_match(ma, mb):
                 leg = np.where(~(p0[g] | p1[g]))[0]
                 a = int(np.random.choice(leg)) if len(leg) > 0 else 0
             na[i] = a
-            if cp == 0: p0[g, a] = True
-            else: p1[g, a] = True; og[g, a] = True
+            if cp == 0:
+                p0[g, a] = True
+            else:
+                p1[g, a] = True
+            og[g, a] = True
         dp_ = torch.from_numpy(na).to(DEVICE)
         dpl_ = torch.full((len(act),), cp, dtype=torch.long, device=DEVICE)
         ma.decode(dp_, dpl_, kva, _br_kva, torch.from_numpy(act).to(DEVICE))

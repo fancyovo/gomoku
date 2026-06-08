@@ -232,7 +232,7 @@ def main():
             return (torch.randn(len(indices), 225, device=device) * self.ns,
                     torch.zeros(len(indices), device=device))
 
-        def evaluate_mcts_leaves(self, pos, plr, cache, indices, path_lengths):
+        def evaluate_mcts_leaves(self, pos, plr, cache, branch_cache, indices, path_lengths):
             return (torch.randn(pos.shape[0], 225, device=device) * self.ns,
                     torch.zeros(pos.shape[0], device=device))
 
@@ -310,7 +310,8 @@ def main():
                     lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
                     sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
                     mdl = model_a if mgr is mga else model_b
-                    lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
+                    br = _br_kva if mgr is mga else _br_kvb
+                    lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, br, sl, lt)
                     ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
                     lp2 = lp2.masked_fill(ot, -1e9)
                     mgr.expand_and_backup(vi.astype(np.int32),

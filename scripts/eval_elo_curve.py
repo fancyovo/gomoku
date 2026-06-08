@@ -33,14 +33,14 @@ def main():
             return m.create_cache(max_games, max_cache_len)
         def sample_first_moves(self, bs, dev):
             return torch.randint(0, 225, (bs,), device=dev)
-        def prefill(self, pos, plr, cache, indices):
+        def prefill(self, pos, plr, cache, branch_cache, indices):
             return (torch.randn(pos.shape[0], 225, device=device) * self.ns,
                     torch.zeros(pos.shape[0], device=device))
-        def decode(self, pos, plr, cache, indices):
+        def decode(self, pos, plr, cache, branch_cache, indices):
             cache.advance(indices)
             return (torch.randn(len(indices), 225, device=device) * self.ns,
                     torch.zeros(len(indices), device=device))
-        def evaluate_mcts_leaves(self, pos, plr, cache, indices, plen):
+        def evaluate_mcts_leaves(self, pos, plr, cache, branch_cache, indices, plen):
             return (torch.randn(pos.shape[0], 225, device=device) * self.ns,
                     torch.zeros(pos.shape[0], device=device))
 
@@ -88,8 +88,8 @@ def main():
             cp = move % 2
             act_np = act.astype(np.int32)
             act_t = torch.from_numpy(act).to(device)
-            for mgr, pol_buf, val_buf, kv in [(mga, root_pol_a, root_val_a, kva),
-                                              (mgb, root_pol_b, root_val_b, kvb)]:
+            for mgr, pol_buf, val_buf, kv, brkv in [(mga, root_pol_a, root_val_a, kva, brkva),
+                                                    (mgb, root_pol_b, root_val_b, kvb, brkvb)]:
                 lp = pol_buf[act].masked_fill(og[act], -1e9)
                 lv = val_buf[act]
                 mgr.expand_roots(act_np,
@@ -105,7 +105,7 @@ def main():
                     lt = torch.from_numpy(np.ascontiguousarray(sel['leaf_lengths'][vi])).to(device)
                     sl = torch.from_numpy(np.ascontiguousarray(sel['game_indices'][vi])).to(device)
                     mdl = ma if mgr is mga else mb
-                    lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, sl, lt)
+                    lp2, lv2 = mdl.evaluate_mcts_leaves(pt, pl2, kv, brkv, sl, lt)
                     ot = torch.from_numpy(np.ascontiguousarray(sel['occ_dense'][vi])).to(device).bool()
                     lp2 = lp2.masked_fill(ot, -1e9)
                     mgr.expand_and_backup(vi.astype(np.int32),
